@@ -1,4 +1,4 @@
-import { test, expect, mockJson, fakeSearch, fakeHit } from './helpers.js'
+import { test, expect, mockJson, fakeSearch, fakeHit, fakeStatus } from './helpers.js'
 
 const box = (page) => page.getByRole('searchbox')
 const results = (page) => page.locator('.result')
@@ -228,6 +228,78 @@ test.describe('search', () => {
     await expect(r.locator('.flag')).toHaveCount(1)
     await expect(r.locator('.flag')).toHaveText('Passport details')
     await expect(r.locator('.scores')).not.toContainText(/activation|keyword|similarity/)
+  })
+
+  test('says which words of similar meaning it also looked for', async ({ page }) => {
+    const base = fakeSearch()
+    await mockJson(page, '**/api/search?*', fakeSearch({
+      network: { ...base.network, expanded: [{ term: 'thread', from: 'needle', similarity: 0.81 }, { term: 'pin', from: 'needle', similarity: 0.8 }] },
+    }))
+    await page.goto('/search?q=needle')
+    await expect(page.locator('.related-words')).toHaveText('Also looked for words of similar meaning found in the files: thread (for needle), pin (for needle).')
+    await mockJson(page, '**/api/search?*', fakeSearch())
+    await page.reload()
+    await expect(results(page)).toHaveCount(1)
+    await expect(page.locator('.related-words')).toHaveCount(0)
+  })
+
+  test('shows what the second reading did to a result', async ({ page }) => {
+    await mockJson(page, '**/api/search?*', fakeSearch({
+      reread: 2,
+      results: [fakeHit({ id: 1, probability: 0.93, first_probability: 0.61, reread: 0.97 }),
+                fakeHit({ id: 2, probability: 0.2, first_probability: 0.55, reread: 0.04 }),
+                fakeHit({ id: 3, probability: 0.1, first_probability: 0.1 })],
+    }))
+    await page.goto('/search?q=needle')
+    await expect(page.locator('.second-reading')).toContainText('The top 2 results were read a second time')
+    await expect(results(page).nth(0).locator('.scores')).toContainText('second reading 0.97 (was 61%)')
+    await expect(results(page).nth(1).locator('.scores')).toContainText('second reading 0.04 (was 55%)')
+    await expect(results(page).nth(2).locator('.scores')).not.toContainText('second reading')
+    await mockJson(page, '**/api/search?*', fakeSearch())
+    await page.reload()
+    await expect(results(page)).toHaveCount(1)
+    await expect(page.locator('.second-reading')).toHaveCount(0)
+  })
+
+  test('deeper search is offered when the language model is installed, and says which wordings it added', async ({ page }) => {
+    const asked = []
+    await mockJson(page, '**/api/status', fakeStatus())
+    await page.route('**/api/search?*', (route) => {
+      const url = new URL(route.request().url())
+      asked.push(url.searchParams.get('deep'))
+      route.fulfill({ json: fakeSearch(url.searchParams.get('deep') ? { also: ['sewing pin', 'small sharp thing'] } : {}) })
+    })
+    await page.goto('/search?q=needle')
+    await expect(results(page)).toHaveCount(1)
+    await expect(page.locator('.other-wordings')).toHaveCount(0)
+    await page.getByLabel(/Deeper search/).check()
+    await expect(page).toHaveURL(/[?&]deep=1/)
+    await expect(page.locator('.other-wordings')).toHaveText('Also searched for these other wordings, suggested by the language model: sewing pin; small sharp thing.')
+    expect(asked).toEqual([null, 'true'])
+    await tab(page, 'Keyword').click()                    // other wordings belong to the IAC mode only
+    await expect(page).not.toHaveURL(/deep=/)
+    await expect(page.getByLabel(/Deeper search/)).toHaveCount(0)
+  })
+
+  test('deeper search is not offered without the language model', async ({ page }) => {
+    await mockJson(page, '**/api/status', fakeStatus({ models: { names: true, reread: true, language: false } }))
+    await mockJson(page, '**/api/search?*', fakeSearch())
+    await page.goto('/search?q=needle')
+    await expect(results(page)).toHaveCount(1)
+    await expect(page.getByLabel(/Deeper search/)).toHaveCount(0)
+  })
+
+  test('a real search for a word fans out only to words that are in the files', async ({ page, request }) => {
+    const data = await (await request.get('/api/search', { params: { q: 'lawsuit about money', mode: 'iac' } })).json()
+    expect(Array.isArray(data.network.expanded)).toBe(true)
+    for (const e of data.network.expanded) {
+      expect(['lawsuit', 'money']).toContain(e.from)
+      expect(e.similarity).toBeGreaterThanOrEqual(0.78)
+      const literal = await (await request.get('/api/search', { params: { q: e.term, mode: 'keyword' } })).json()
+      expect(literal.results.length, `"${e.term}" is in a file`).toBeGreaterThan(0)
+    }
+    await page.goto('/search?q=lawsuit+about+money')
+    await expect(page.locator('.related-words')).toHaveCount(data.network.expanded.length ? 1 : 0)
   })
 
   test('a file reached only through links is labelled as not containing the words', async ({ page }) => {

@@ -4,7 +4,7 @@ import { api } from '../api.js'
 import { flagLabel } from '../flags.jsx'
 import { useTitle } from '../title.js'
 
-const KINDS = { person: 'Person', org: 'Organisation', case_no: 'Case number', file_ref: 'File reference', registry: 'Registry volume' }
+const KINDS = { person: 'Person', org: 'Organisation', place: 'Place', case_no: 'Case number', file_ref: 'File reference', registry: 'Registry volume' }
 const yesNo = (v) => (v ? 'yes' : 'no')
 const pct = (v) => (v == null ? null : `${Math.round(v * 100)}%`)
 const docLink = (id, text) => <Link to={`/documents/${id}`}>{text}</Link>
@@ -23,6 +23,9 @@ const VIEWS = [
     ['Type confidence', (d) => pct(d.doc_type_conf)],
     ['Date', (d) => d.doc_date],
     ['Subject', (d) => d.subject],
+    ['Topic', (d) => d.topic],
+    ['Summary', (d) => d.summary],
+    ['Type of similar files', (d) => d.suggested_type],
     ['Matter', (d) => d.matter],
     ['Parties', (d) => d.parties.map(([name, role]) => `${name} (${role})`).join('; ')],
     ['Checks', (d) => d.flags.map(flagLabel).join('; ')],
@@ -54,6 +57,7 @@ const VIEWS = [
   ['entities', 'Names and references', (db) => db.entities, [
     ['Kind', (e) => KINDS[e.kind] || e.kind],
     ['Value', (e) => <Link to={`/search?q=${encodeURIComponent(e.value)}`}>{e.value}</Link>],
+    ['Also written', (e) => e.aliases.join('; ')],
     ['Files', (e) => e.documents],
     ['Mentions', (e) => e.mentions],
   ]],

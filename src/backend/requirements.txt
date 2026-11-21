@@ -8,5 +8,10 @@ numpy
 pillow
 wordninja
 ZODB
+lemminflect
+huggingface_hub
+tokenizers
+onnxruntime
+llama-cpp-python
 pytest
 httpx

@@ -159,3 +159,236 @@ def test_database_listing_matches_what_is_stored(client):
     assert db["judgements"] == [{"query": "thompson", "doc_id": doc_id, "document": db["judgements"][0]["document"],
                                  "relevant": False, "activation": 0.2, "created": db["judgements"][0]["created"]}]
     assert db["jobs"] == [] or db["jobs"][0]["status"] == "done"
+
+
+def test_filter_counts_follow_the_other_filters(client):
+    count = lambda facet, value: next(f["count"] for f in facet if f["value"] == value)
+    everything = client.get("/api/facets").json()
+    assert count(everything["doc_type"], "Conveyance") == 1 and count(everything["matter"], "LEG/1/1") == 2
+    narrowed = client.get("/api/facets", params={"q": "thompson"}).json()
+    assert count(narrowed["doc_type"], "Conveyance") == 0           # still offered, with nothing behind it
+    assert count(narrowed["doc_type"], "Memorandum") == 1
+    assert [f["value"] for f in narrowed["doc_type"]] == [f["value"] for f in everything["doc_type"]]
+    chosen = client.get("/api/facets", params={"doc_type": "Memorandum"}).json()
+    assert count(chosen["doc_type"], "Conveyance") == 1             # a menu does not count against itself
+    assert count(chosen["matter"], "LEG/2/9") == 0 and count(chosen["flag"], "pii:passport") == 0
+    for facet, value in (("doc_type", "Memorandum"), ("matter", "LEG/1/1"), ("flag", "bundle")):
+        listed = client.get("/api/documents", params={"q": "thompson", facet: value}).json()
+        assert len(listed) == count(narrowed[facet], value)
+
+
+def test_iac_search_fans_out_to_words_of_similar_meaning(client):
+    docs = by_name(client)
+    data = client.get("/api/search", params={"q": "lawsuit", "mode": "iac"}).json()     # the word is in no file
+    assert data["network"]["unknown_terms"] == ["lawsuit"]
+    found = {e["term"] for e in data["network"]["expanded"]}
+    assert found and found <= {"plaintiff", "claim", "defendant", "defence", "court", "summon"}
+    assert all(e["from"] == "lawsuit" and 0.78 <= e["similarity"] < 1 for e in data["network"]["expanded"])
+    top = data["results"][0]
+    assert top["id"] == docs["writ.pdf"]["id"] and top["probability"] > 0.5
+    assert not top["matched_text"] and "[[" in top["snippet"]      # shows the passage with the related word
+    assert any("related to lawsuit" in w["label"] for w in top["why"])
+    plain = client.get("/api/search", params={"q": "zebra spaceship", "mode": "iac"}).json()
+    assert plain["network"]["expanded"] == []
+
+
+# --- language processing -----------------------------------------------------
+def test_words_are_reduced_to_their_dictionary_form(client):
+    from agfilenet.textutil import tokens
+    assert tokens("She was employed; they failed to keep the staircases dry") == \
+        tokens("employing fails keeping staircase drier")[:4] + ["dry"]
+    assert tokens("Thompson's Bahamas summonses") == ["thompson", "bahama", "summons"]   # names are left nearly alone
+    docs = by_name(client)
+    hits = client.get("/api/search", params={"q": "employs nurses", "mode": "keyword"}).json()["results"]
+    assert [h["id"] for h in hits] == [docs["writ.pdf"]["id"]]      # the file says "a nurse employed"
+
+
+def test_misread_words_are_found_under_the_intended_word():
+    from agfilenet import spelling, store as st
+    counts = {"negligence": 12, "negligcnce": 1, "neglgence": 2, "plaintiff": 9, "plaintifs": 1,
+              "thompson": 8, "thonpson": 1, "clinic": 7, "clinics": 1}
+    fixes = spelling.corrections(counts)
+    assert fixes == {"negligcnce": "negligence", "neglgence": "negligence", "plaintifs": "plaintiff"}
+    assert spelling.corrections({"planted": 6, "planned": 6, "planxed": 1, "plannned": 1}) == \
+        {"plannned": "planned"}                                      # one edit from two words: left alone
+    index = st.TextIndex(fixes)
+    index.add(1, "particulars of negligcnce at the clinic")
+    index.add(2, "a conveyance of land")
+    assert set(index.search(["negligence"])[0]) == {1} and set(index.search(["negligcnce"])[0]) == {1}
+    index.remove(1, "particulars of negligcnce at the clinic")
+    assert not index.search(["negligence"])[0]
+
+
+def test_spellings_of_one_name_become_one_entity():
+    from agfilenet import entities
+
+    def seen(count, *where):
+        return {"count": count, "where": set(where)}
+    names = {("person", "angela thompson"): seen(9, "m1"), ("person", "a thompson"): seen(2, "m1"),
+             ("person", "angela thonpson"): seen(1, "m1"), ("person", "andrew thompson"): seen(3, "m2"),
+             ("person", "p rolle"): seen(1, "m3"), ("person", "peter rolle"): seen(4, "m3"),
+             ("person", "patricia rolle"): seen(4, "m3"), ("person", "john smith"): seen(2, "m1"),
+             ("person", "joan smith"): seen(2, "m1"), ("org", "ministry of health"): seen(5, "m1"),
+             ("org", "the ministry of health"): seen(2, "m7"), ("org", "ministry of heaith"): seen(1, "m1")}
+    stored = entities.cluster(names)
+    same = lambda a, b: stored[a] == stored[b]
+    assert same(("person", "a thompson"), ("person", "angela thompson"))        # an initial, in the same matter
+    assert same(("person", "angela thonpson"), ("person", "angela thompson"))   # a misreading
+    assert stored[("person", "angela thompson")] == ("person", "angela thompson")
+    assert not same(("person", "andrew thompson"), ("person", "angela thompson"))   # another matter, another name
+    assert stored[("person", "p rolle")] == ("person", "p rolle")               # could be either Rolle: not guessed
+    assert not same(("person", "john smith"), ("person", "joan smith"))         # two people, not a misreading
+    assert len({stored[k] for k in names if k[0] == "org"}) == 1
+    assert entities.clean("person", "Mr. PETER ROLLE") == "Peter Rolle"
+    assert entities.clean("person", "Plaintiff") is None and entities.clean("org", "OF SUMMONS") is None
+
+
+def test_a_name_read_in_one_file_is_linked_wherever_it_is_written():
+    from agfilenet import ingest, store as st
+    lib = st.Library()
+    for name, text, names in [("a.pdf", "A note that Delroy Farquharson called.", [("person", "Delroy Farquharson", 0.99)]),
+                              ("b.pdf", "Spoke again with delroy farquharson about the lease.", []),
+                              ("c.pdf", "Nothing here about Farquharson Delroy Ltd.", [])]:
+        doc = lib.add_document(name, name)
+        doc.status = "ok"
+        page = st.Page(doc, 1, text, "text")
+        page.names = names
+        doc.pages.append(page)
+    ingest.analyse(lib)
+    assert sorted(lib.entities[("person", "delroy farquharson")].documents) == [1, 2]
+
+
+def test_names_are_found_without_a_title_in_front(client):
+    from agfilenet import ner
+    if not ner.available():
+        pytest.skip("the name-finding model is not installed")
+    found = ner.find("The affidavit was sworn by Monique Cox at Nassau before an officer of the Ministry of Health.")
+    assert [(kind, text) for kind, text, _conf in found] == \
+        [("person", "Monique Cox"), ("place", "Nassau"), ("org", "Ministry of Health")]
+    db = client.get("/api/database").json()
+    people = {e["value"]: e for e in db["entities"] if e["kind"] == "person"}
+    assert people["Angela Thompson"]["documents"] == 2 and people["Peter Rolle"]["documents"] == 2
+    assert not any("Plaintiff" in name or "Summons" in name for name in people)
+    assert all("aliases" in e for e in db["entities"])
+
+
+def test_files_get_a_summary_and_a_topic(client):
+    docs = by_name(client)
+    summary = docs["writ.pdf"]["summary"]
+    assert "negligence" in summary and summary.startswith("The Plaintiff") and "STATEMENT OF CLAIM" not in summary
+    assert all(d["topic"] for d in docs.values()) and len({d["topic"] for d in docs.values()}) == 2
+    topics = client.get("/api/facets").json()["topic"]
+    assert sum(t["count"] for t in topics) == 3
+    listed = client.get("/api/documents", params={"topic": topics[0]["value"]}).json()
+    assert len(listed) == topics[0]["count"]
+    assert "topic" in client.get("/api/export.csv").text.splitlines()[0]
+
+
+def test_type_suggestions_follow_the_types_of_similar_files():
+    import numpy as np
+    from types import SimpleNamespace
+    from agfilenet import insight
+
+    def doc(doc_type, edited=False, conf=0.9):
+        return SimpleNamespace(doc_type=doc_type, edited=edited, doc_type_conf=conf, suggested_type=None,
+                               suggested_conf=None)
+    letter, memo = np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
+    near = lambda v, w: (v + 0.05 * w) / np.linalg.norm(v + 0.05 * w)
+    docs = [doc("Letter"), doc("Letter"), doc("Letter"), doc("Memorandum"), doc("Memorandum"), doc("Memorandum"),
+            doc(None, conf=None), doc("Memorandum", conf=0.4), doc("Affidavit", edited=True)]
+    vectors = np.array([letter, near(letter, memo), letter, memo, near(memo, letter), memo,
+                        near(letter, memo), letter, np.array([0.8, 0.0, 0.6])])
+    insight.suggest_types(docs, vectors, vectors.copy())
+    assert docs[6].suggested_type == "Letter" and docs[6].suggested_conf >= 0.5     # untyped, sits among letters
+    assert docs[7].suggested_type == "Letter"                                       # a weak rule is overruled
+    assert docs[0].suggested_type is None and docs[3].suggested_type is None        # already agree
+    assert docs[8].suggested_type is None                                           # a person decided: not second-guessed
+
+
+def test_correcting_a_type_is_kept_as_an_example(client):
+    doc_id = by_name(client)["memo.pdf"]["id"]
+    patched = client.patch(f"/api/documents/{doc_id}", json={"doc_type": "Letter"}).json()
+    assert patched["doc_type"] == "Letter" and patched["suggested_type"] is None
+    assert {d["doc_type"] for d in by_name(client).values()} == {"Letter", "Writ of Summons", "Conveyance"}
+
+
+def test_second_reading_reorders_the_best_results(client):
+    from agfilenet import rerank
+    if not rerank.available():
+        pytest.skip("the re-ranking model is not installed")
+    docs = by_name(client)
+    data = client.get("/api/search", params={"q": "who fell on the stairs", "mode": "iac"}).json()
+    top = data["results"][0]
+    assert top["id"] == docs["writ.pdf"]["id"] and data["reread"] >= 1
+    assert top["reread"] > 0.5 and top["probability"] >= top["first_probability"]
+    assert [h["probability"] for h in data["results"]] == sorted((h["probability"] for h in data["results"]),
+                                                                 reverse=True)
+    plain = client.get("/api/search", params={"q": "who fell on the stairs", "mode": "iac", "reread": "false"}).json()
+    assert plain["reread"] == 0 and all(h["reread"] is None for h in plain["results"])
+    assert all(h["probability"] == h["first_probability"] for h in plain["results"])
+    number = client.get("/api/search", params={"q": "36/T/514", "mode": "iac"}).json()
+    assert number["reread"] == 0                                    # a reference is not a question to be read
+
+
+def test_deeper_search_adds_other_wordings(client, monkeypatch):
+    from agfilenet import llm
+    asked = []
+    monkeypatch.setattr(llm, "rewordings", lambda q, wait=30: asked.append(q) or ("sale of a plot of land",))
+    docs = by_name(client)
+    plain = client.get("/api/search", params={"q": "disposal of realty", "mode": "iac"}).json()
+    deep = client.get("/api/search", params={"q": "disposal of realty", "mode": "iac", "deep": "true"}).json()
+    assert asked == ["disposal of realty"] and plain["also"] == [] and deep["also"] == ["sale of a plot of land"]
+    first = lambda data: {h["id"]: h["first_probability"] for h in data["results"]}
+    conveyance = docs["conveyance.pdf"]["id"]
+    assert first(deep)[conveyance] >= first(plain).get(conveyance, 0)
+    assert deep["results"][0]["id"] == conveyance
+
+
+def test_a_question_is_answered_from_the_passages_found(client, monkeypatch):
+    import time
+    from agfilenet import llm
+    seen = {}
+
+    def fake_answer(question, passages):
+        seen.update(question=question, passages=passages)
+        return "Peter Rolle has conduct of the file [1]."
+    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(llm, "answer", fake_answer)
+    docs = by_name(client)
+    asked = client.post("/api/ask", json={"question": " Who has conduct of the Thompson file? "}).json()
+    assert asked["status"] == "thinking" and asked["question"] == "Who has conduct of the Thompson file?"
+    assert asked["sources"][0]["id"] == docs["memo.pdf"]["id"] and asked["sources"][0]["page"] == 1
+    assert "conduct of this file" in asked["sources"][0]["text"]
+    for _ in range(50):
+        state = client.get(f"/api/ask/{asked['id']}").json()
+        if state["status"] != "thinking":
+            break
+        time.sleep(0.1)
+    assert state == {"status": "done", "answer": "Peter Rolle has conduct of the file [1]."}
+    assert seen["passages"] == [s["text"] for s in asked["sources"]]
+    assert client.get("/api/ask/nonsense").status_code == 404
+    assert client.post("/api/ask", json={"question": "  "}).status_code == 422
+    monkeypatch.setattr(llm, "available", lambda: False)
+    without = client.post("/api/ask", json={"question": "Who bought the land?"}).json()
+    assert without["status"] == "unavailable" and without["sources"]    # the passages are still worth having
+
+
+def test_status_says_which_models_are_installed(client):
+    assert set(client.get("/api/status").json()["models"]) == {"names", "reread", "language"}
+
+
+def test_an_older_database_is_brought_up_to_date(client):
+    with store.Session(write=True) as s:
+        assert not ingest.needs_upgrade(s.lib)
+        s.lib.text_index.version = 1
+        for doc in s.lib.documents.values():
+            doc.summary = doc.summary_of = doc.topic = None
+    with store.Session() as s:
+        assert ingest.needs_upgrade(s.lib)
+    ingest.upgrade()
+    with store.Session() as s:
+        assert not ingest.needs_upgrade(s.lib) and s.lib.text_index.version == store.TextIndex.TERMS
+    docs = by_name(client)
+    assert docs["writ.pdf"]["summary"] and docs["writ.pdf"]["topic"] and len(docs) == 3
+    hits = client.get("/api/search", params={"q": "stairs negligence", "mode": "keyword"}).json()["results"]
+    assert hits[0]["id"] == docs["writ.pdf"]["id"]

@@ -125,11 +125,13 @@ test.describe('database page', () => {
     await expect(page).toHaveURL(/\/database\/found$/)
     await expect(page.getByRole('heading', { level: 1, name: 'Metadata found in the documents' })).toBeVisible()
     const names = ['Titles', 'Document types', 'Dates', 'Subjects', 'Matters', 'Parties', 'People', 'Organisations',
-      'Court and case numbers', 'File references', 'Registry volumes', 'Checks raised']
+      'Places', 'Court and case numbers', 'File references', 'Registry volumes', 'Topics', 'Checks raised']
     expect(await page.locator('section.card').first().locator('li a').allTextContents()).toEqual(names)
     for (const [name, values] of [
       ['People', db.entities.filter((e) => e.kind === 'person').map((e) => e.value)],
       ['Organisations', db.entities.filter((e) => e.kind === 'org').map((e) => e.value)],
+      ['Places', db.entities.filter((e) => e.kind === 'place').map((e) => e.value)],
+      ['Topics', db.documents.map((d) => d.topic)],
       ['Document types', db.documents.map((d) => d.doc_type)],
       ['Titles', db.documents.map((d) => d.title)],
     ]) {
@@ -146,7 +148,7 @@ test.describe('database page', () => {
   test('the metadata-found page copes with an empty database and a failed load', async ({ page }) => {
     await mockJson(page, '**/api/database', fakeDb())
     await page.goto('/database/found')
-    await expect(page.getByText('None found.')).toHaveCount(12)
+    await expect(page.getByText('None found.')).toHaveCount(14)
     await mockJson(page, '**/api/database', { detail: 'database is locked' }, 500)
     await page.reload()
     await expect(page.locator('.error')).toHaveText('database is locked')

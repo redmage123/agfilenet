@@ -36,6 +36,7 @@ export const fakeStatus = (over = {}) => ({
   flags: { bundle: 2, 'pii:passport': 1 },
   entities: 9,
   duplicate_pages: 4,
+  models: { names: true, reread: true, language: true },
   job: null,
   ...over,
 })
@@ -66,6 +67,10 @@ export const fakeDoc = (over = {}) => ({
   decl_doc_type: null,
   decl_comments: null,
   sha256: 'ab'.repeat(32),
+  summary: null,
+  topic: null,
+  suggested_type: null,
+  suggested_conf: null,
   flags: ['rotated-pages', 'made-up-flag'],
   parties: [['Alex Example', 'Plaintiff']],
   pages: [
@@ -100,6 +105,8 @@ export const fakeHit = (over = {}) => ({
   page: 2,
   snippet: 'before [[needle]] after',
   matched_text: true,
+  first_probability: 0.9,
+  reread: null,
   why: [{ kind: 'term', label: 'needle', in_query: true, input: 0.4 }],
   ...over,
 })
@@ -118,6 +125,8 @@ export const fakeSearch = (over = {}) => ({
     params: {},
   },
   calibration: { fitted: false, judgements: 3, needed: 20 },
+  reread: 0,
+  also: [],
   ...over,
 })
 

@@ -104,4 +104,28 @@ test.describe('server', () => {
     for (const a of assets) expect((await request.get(a)).status(), a).toBe(200)
     expect((await request.get('/assets/nope.js')).status()).toBe(404)
   })
+
+  test('status says which local models are installed, and files carry what the models derived', async ({ request, corpus }) => {
+    expect(Object.keys(corpus.status.models).sort()).toEqual(['language', 'names', 'reread'])
+    for (const d of corpus.docs) {
+      for (const key of ['summary', 'topic', 'suggested_type', 'suggested_conf']) expect(d).toHaveProperty(key)
+      if (d.suggested_type) expect(d.suggested_type).not.toBe(d.doc_type)
+    }
+    const topics = corpus.facets.topic
+    if (corpus.docs.length >= 3) expect(topics.length).toBeGreaterThanOrEqual(2)
+    expect(topics.reduce((n, t) => n + t.count, 0)).toBe(corpus.docs.filter((d) => d.topic).length)
+    for (const d of corpus.details) for (const e of d.entities) expect(Array.isArray(e.aliases)).toBe(true)
+  })
+
+  test('the second reading can be switched off, and never breaks the order of the results', async ({ request, corpus }) => {
+    const q = (corpus.docs.find((d) => d.subject) || corpus.docs[0]).subject || 'letter about the claim'
+    const on = await (await request.get('/api/search', { params: { q, mode: 'iac' } })).json()
+    const off = await (await request.get('/api/search', { params: { q, mode: 'iac', reread: 'false' } })).json()
+    expect(off.reread).toBe(0)
+    for (const h of off.results) expect(h.reread).toBeNull()
+    if (!corpus.status.models.reread) expect(on.reread).toBe(0)
+    expect(on.reread).toBe(on.results.filter((h) => h.reread != null).length)
+    const probs = on.results.map((h) => h.probability)
+    expect(probs).toEqual([...probs].sort((a, b) => b - a))
+  })
 })

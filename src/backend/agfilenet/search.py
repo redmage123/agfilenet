@@ -6,8 +6,8 @@ from collections import Counter, defaultdict
 
 import numpy as np
 
-from . import embed, iac, store
-from .textutil import norm_name, tokens
+from . import embed, iac, rerank, store, vocabulary
+from .textutil import norm_name, stem, tokens, words, written_forms
 
 MODES = ("iac", "hybrid", "keyword", "semantic")
 
@@ -22,6 +22,8 @@ REFERENCE_KINDS = ("case_no", "file_ref", "registry")   # a quoted reference is 
 # Competition between documents is scaled down: several documents can be right at once.
 DOC_GAMMA = 0.5
 TERM_BUDGET = 2.0   # query words together drive documents like this many full-strength words
+REWORDING = 0.8      # what a rewording of the whole query by the language model counts for
+RELATED_FLOOR = 0.5  # a related word drives documents at (similarity - floor) / (1 - floor) of its query word
 IAC_PARAMS = iac.Params()   # the textbook values
 FULL_NETWORK_MAX_DOCS = 1500
 CANDIDATES = 400
@@ -31,6 +33,14 @@ CANDIDATES = 400
 DEFAULT_CALIBRATION = (12.0, -4.8)   # 50% at activation 0.4
 MIN_JUDGEMENTS = 20
 MIN_PROBABILITY = 0.02     # results below this are not listed
+
+# Second reading of the best results by the cross-encoder (see rerank.py). Its
+# verdict r (0..1) moves a result's log-odds by RERANK_WEIGHT * (2r - 1). When it
+# finds no passage that answers the query (a description of a document rather
+# than of its contents, say) it has nothing to tell the results apart by, and abstains.
+RERANK_TOP = 12
+RERANK_WEIGHT = 2.5
+RERANK_ABSTAIN = 0.3
 
 _lock = threading.Lock()
 _index = None
@@ -76,7 +86,7 @@ class Index:
         for d in docs:
             c = Counter()
             for page in d.pages:
-                c.update(tokens(page.text or ""))
+                c.update(lib.text_index.terms(page.text or ""))
             extra = (d.title, d.subject, d.matter, d.filename, d.decl_matter_title, d.decl_reference,
                      d.decl_comments)
             c.update(tokens(" ".join(str(x) for x in extra if x)))
@@ -92,6 +102,9 @@ class Index:
             # a long file that contains the word is still a file that contains it
             self.term_links[term] = {i: idf * tf / (tf + 0.5) for i, tf in tfs.items()}
         self.term_idf = {t: _idf_norm(len(d), n) for t, d in postings.items()}
+        # the form each term is usually written in, for comparing words by meaning
+        self.written = {t: w for t, w in written_forms(self.chunk_text).items() if t in self.term_links}
+        vocabulary.learn_in_background(self.written.values())
 
         # entity links, read off the Document -> Mention -> Entity references
         self.entities = {}
@@ -142,23 +155,23 @@ def _fit_calibration(lib):
 
 
 # --- keyword ---------------------------------------------------------------
-def _highlight(text, terms, width=34):
+def _highlight(text, terms, terms_of, width=34):
     """A window of the passage around the first matched word, with matches marked [[like this]]."""
     words = text.split()
-    hits = [i for i, w in enumerate(words) if any(t in terms for t in tokens(w, keep_stop=True))]
+    hits = [i for i, w in enumerate(words) if any(t in terms for t in terms_of(w, keep_stop=True))]
     start = max(0, (hits[0] if hits else 0) - width // 3)
     window = [f"[[{w}]]" if i in set(hits) else w for i, w in enumerate(words)][start:start + width]
     return ("… " if start else "") + " ".join(window) + (" …" if start + width < len(words) else "")
 
 
-def keyword_scores(lib, index, query):
+def keyword_scores(lib, index, query, terms=None):
     """Best-chunk BM25 per document from the persistent text index.
 
     Returns {doc index: (score, chunk row, snippet)}. Text in double quotes
     must appear as a phrase.
     """
     phrases = [norm_name(p) for p in re.findall(r'"([^"]+)"', query)]
-    terms = tokens(query) or tokens(query, keep_stop=True)
+    terms = terms or tokens(query) or tokens(query, keep_stop=True)
     scores, matched = lib.text_index.search(terms)
     best = {}
     for chunk_id, score in sorted(scores.items(), key=lambda kv: -kv[1]):
@@ -171,7 +184,7 @@ def keyword_scores(lib, index, query):
         text = index.chunk_text[row]
         if phrases and not all(f" {p} " in f" {norm_name(text)} " for p in phrases if p):
             continue
-        best[doc] = (score, row, _highlight(text, matched[chunk_id]))
+        best[doc] = (score, row, _highlight(text, matched[chunk_id], lib.text_index.terms))
     return best
 
 
@@ -200,19 +213,44 @@ def semantic_scores(index, query):
     return np.clip((raw - SEM_FLOOR) / SEM_SPAN, 0.0, 1.0), raw, best
 
 
+def _fan_out(index, query):
+    """Rewordings of the query, each with one word swapped for the collection's closest word to it.
+
+    Returns [(reworded query, similarity of the swapped word)].
+    """
+    out = []
+    for t, written in dict(words(query)).items():
+        near = vocabulary.neighbours(written, index.written)
+        if near:
+            word, similarity = index.written[near[0][0]], near[0][1]
+            out.append((re.sub(r"[A-Za-z]+", lambda m: word if stem(m.group(0)) == t else m.group(0), query),
+                        similarity))
+    return out
+
+
 # --- IAC ---------------------------------------------------------------------
 def _query_properties(index, query):
     """External input for property units: [(kind, key, label, strength)]."""
     props, norm_q = [], " " + norm_name(query) + " "
-    q_tokens = list(dict.fromkeys(tokens(query)))
+    typed = dict(words(query))             # term -> the word as typed
+    q_tokens = list(typed)
     # The query's words share a fixed budget of influence, split by rarity, so a
     # file matching two words of a two-word query outranks one matching two of
     # five. Words that occur in no document take their share with them.
     weight = {t: max(0.25, index.term_idf.get(t, 1.0)) for t in q_tokens}
     total = sum(weight.values())
+    expanded = []
     for t in q_tokens:
+        share = min(1.0, TERM_BUDGET * weight[t] / total)
         if t in index.term_links:
-            props.append(("term", t, t, min(1.0, TERM_BUDGET * weight[t] / total)))
+            props.append(("term", t, t, share))
+        # fan the word out to collection words that mean nearly the same
+        for word, similarity in vocabulary.neighbours(typed[t], index.written):
+            if word not in q_tokens and all(word != e["key"] for e in expanded):
+                expanded.append({"key": word, "term": index.written[word], "from": typed[t],
+                                 "similarity": round(similarity, 3)})
+                props.append(("term", word, f"{index.written[word]} (related to {typed[t]})",
+                              share * (similarity - RELATED_FLOOR) / (1 - RELATED_FLOOR)))
     q_words, quoted = set(norm_q.split()), set()
     for e in index.entities.values():
         if not e["docs"]:
@@ -237,7 +275,7 @@ def _query_properties(index, query):
     # A reference number has no meaning for the embedding model to match, so the part
     # of the query that is one takes its share of the semantic input away.
     prose = [t for t in q_tokens if t not in quoted and not any(c.isdigit() for c in t)]
-    return props, q_tokens, (len(prose) / len(q_tokens) if q_tokens else 1.0)
+    return props, q_tokens, (len(prose) / len(q_tokens) if q_tokens else 1.0), expanded
 
 
 def _build_network(index, doc_rows, stimulated):
@@ -290,7 +328,8 @@ def _build_network(index, doc_rows, stimulated):
 
 def iac_search(index, query, semantic):
     """Run the IAC network for a query. Returns per-document activations and an explanation."""
-    stimulated, q_tokens, prose = _query_properties(index, query)
+    stimulated, q_tokens, prose, expanded = _query_properties(index, query)
+    typed = dict(words(query))
     semantic = semantic * prose
     n = len(index.docs)
     if n <= FULL_NETWORK_MAX_DOCS:
@@ -337,7 +376,8 @@ def iac_search(index, query, semantic):
          if act[n_docs + j] > 0.05), key=lambda u: -u["activation"])[:40]
     network = {"units": len(weights), "documents": n_docs, "cycles": result.cycles, "settled": result.settled,
                "active_units": active_units,
-               "unknown_terms": [t for t in q_tokens if t not in index.term_links],
+               "unknown_terms": [typed.get(t, t) for t in q_tokens if t not in index.term_links],
+               "expanded": expanded,
                "params": {"max": p.max, "min": p.min, "rest": p.rest, "decay": p.decay, "estr": p.estr,
                           "alpha": p.alpha, "gamma": p.gamma, "doc_gamma_scale": DOC_GAMMA}}
     return doc_act, reasons, network
@@ -349,8 +389,27 @@ def _snippet(text, limit=260):
     return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + " …"
 
 
-def search(query, mode="iac", limit=25):
-    """Search and return ranked possible matches with match probabilities."""
+def _reread(index, query, candidates, passages_of):
+    """{doc index: the cross-encoder's verdict on its best passage}; {} if it is absent or abstains."""
+    texts, owner = [], []
+    for d in candidates:
+        for row in passages_of(d):
+            texts.append(index.chunk_text[row])
+            owner.append(d)
+    verdicts = rerank.scores(query, texts)
+    if verdicts is None or verdicts.max() < RERANK_ABSTAIN:
+        return {}
+    best = {}
+    for d, verdict in zip(owner, verdicts):
+        best[d] = max(best.get(d, 0.0), float(verdict))
+    return best
+
+
+def search(query, mode="iac", limit=25, reread=True, also=()):
+    """Search and return ranked possible matches with match probabilities.
+
+    `also` is other wordings of the query (from the language model) to look for as well.
+    """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
     query = (query or "").strip()
@@ -361,11 +420,15 @@ def search(query, mode="iac", limit=25):
                        "needed": MIN_JUDGEMENTS}
         if not query or not index.docs:
             return {"query": query, "mode": mode, "results": [], "p_none": 1.0, "network": None,
-                    "calibration": calibration}
+                    "calibration": calibration, "reread": 0, "also": []}
         keyword = keyword_scores(lib, index, query) if mode != "semantic" else {}
         q_terms = tokens(query) or tokens(query, keep_stop=True)
         p_keyword = np.array([_keyword_probability(keyword[d][0], lib, q_terms) if d in keyword else 0.0
                               for d in range(len(index.docs))])
+        # passages to show for files found only through a related word
+        fanned = [term for _t, written in words(query) for term, _s in vocabulary.neighbours(written, index.written)] \
+            if mode == "iac" else []
+        near = keyword_scores(lib, index, "", fanned) if fanned else {}
 
     n = len(index.docs)
     if mode != "keyword":
@@ -383,6 +446,9 @@ def search(query, mode="iac", limit=25):
         probability = 1.0 - (1.0 - p_keyword) * (1.0 - semantic)  # either kind of evidence can make a match
         score = strength = probability
     else:
+        # a rewording counts for as much as its swapped word resembles the original
+        for reworded, similarity in _fan_out(index, query) + [(wording, REWORDING) for wording in also]:
+            semantic = np.maximum(semantic, similarity * semantic_scores(index, reworded)[0])
         activation, reasons, network = iac_search(index, query, semantic)
         a, b = index.calibration
         probability = np.array([_sigmoid(a * x + b) if x > 0 else 0.0 for x in activation])
@@ -390,13 +456,30 @@ def search(query, mode="iac", limit=25):
 
     # Relative probability: Luce choice rule over the matches plus a "none of these" alternative.
     share, p_none = iac.luce_choice(np.where(probability > 0, strength, 0.0))
-    order = [int(d) for d in np.argsort(-score) if probability[d] > MIN_PROBABILITY][:limit]
+    order = [int(d) for d in np.argsort(-score) if probability[d] > MIN_PROBABILITY]
+
+    # Second reading: the cross-encoder reads the query against the best passages of the top results.
+    first, verdicts = probability, {}
+    if reread and mode in ("iac", "hybrid") and any(t.isalpha() for t in q_terms):
+        def passages_of(d):
+            rows = [keyword[d][1]] if d in keyword else [near[d][1]] if d in near else []
+            return dict.fromkeys(rows + ([int(sem_best[d])] if sem_best[d] >= 0 else []))
+        verdicts = _reread(index, query, order[:RERANK_TOP], passages_of)
+        if verdicts:
+            probability = probability.copy()
+            for d, verdict in verdicts.items():
+                p = min(max(float(first[d]), 1e-6), 1 - 1e-6)
+                probability[d] = _sigmoid(math.log(p / (1 - p)) + RERANK_WEIGHT * (2 * verdict - 1))
+            order.sort(key=lambda d: -probability[d])
+    order = [d for d in order if probability[d] > MIN_PROBABILITY][:limit]
 
     results = []
     for d in order:
         doc = index.docs[d]
         if d in keyword:
             row, snippet = keyword[d][1], keyword[d][2]
+        elif d in near:
+            row, snippet = near[d][1], near[d][2]
         elif sem_best[d] >= 0:
             row, snippet = int(sem_best[d]), _snippet(index.chunk_text[int(sem_best[d])])
         else:
@@ -407,6 +490,8 @@ def search(query, mode="iac", limit=25):
             "flags": doc["flags"],
             "score": round(float(score[d]), 4),
             "probability": round(float(probability[d]), 4),
+            "first_probability": round(float(first[d]), 4),
+            "reread": round(verdicts[d], 3) if d in verdicts else None,
             "share": round(float(share[d]), 4),
             "keyword_score": round(float(keyword[d][0]), 3) if d in keyword else None,
             "semantic_score": round(float(cosine[d]), 3) if mode != "keyword" else None,
@@ -417,7 +502,42 @@ def search(query, mode="iac", limit=25):
             "why": reasons.get(d, [])[:6],
         })
     return {"query": query, "mode": mode, "results": results, "p_none": round(float(p_none), 4),
-            "network": network, "calibration": calibration}
+            "network": network, "calibration": calibration,
+            "reread": sum(r["reread"] is not None for r in results), "also": list(also)}
+
+
+def passages(query, limit=5, per_document=2):
+    """The passages most likely to answer a question, best first, for the language model to read.
+
+    Candidates come from the keyword index and from the embeddings; the
+    cross-encoder then picks among them (without it, the embedding order stands).
+    """
+    query = (query or "").strip()
+    with store.Session() as session:
+        lib = session.lib
+        index = get_index(lib)
+        if not query or not len(index.chunk_text):
+            return []
+        scores, _matched = lib.text_index.search(tokens(query))
+        by_keyword = [index.chunk_row[c] for c, _s in sorted(scores.items(), key=lambda kv: -kv[1])[:20]
+                      if c in index.chunk_row]
+    similarity = index.embeddings @ embed.embed_query(query)
+    rows = list(dict.fromkeys(np.argsort(-similarity)[:20].tolist() + by_keyword))
+    verdicts = rerank.scores(query, [index.chunk_text[r] for r in rows])
+    score = {r: float(verdicts[i]) if verdicts is not None else float(similarity[r]) for i, r in enumerate(rows)}
+    out, taken, seen = [], Counter(), set()
+    for row in sorted(rows, key=lambda r: -score[r]):
+        doc = index.docs[int(index.chunk_doc[row])]
+        text = " ".join(index.chunk_text[row].split())
+        if taken[doc["id"]] >= per_document or text in seen:    # copies of a page say nothing new
+            continue
+        taken[doc["id"]] += 1
+        seen.add(text)
+        out.append({"id": doc["id"], "title": doc["title"], "filename": doc["filename"], "matter": doc["matter"],
+                    "page": index.chunk_page[row], "text": text, "score": round(score[row], 3)})
+        if len(out) == limit:
+            break
+    return out
 
 
 def related(lib, doc, limit=8):

@@ -6,8 +6,8 @@ points out problems that need a person's decision before migration, and lets you
 search the collection by keyword, by meaning, or with an Interactive Activation
 and Competition (IAC) network. Every search result carries a match probability.
 
-**Nothing leaves this machine.** OCR and text embeddings use open-source models
-that run locally; the documents contain passports, National Insurance numbers
+**Nothing leaves this machine.** OCR, text embeddings, name finding, re-ranking
+and the question-answering language model are open-source models that run locally; the documents contain passports, National Insurance numbers
 and medical details.
 
 ## Running it
@@ -15,8 +15,13 @@ and medical details.
 ```sh
 # once
 python3 -m venv .venv
-.venv/bin/pip install -e src/backend
+# (the extra index has prebuilt CPU wheels of the language-model runtime, so no compiler is needed)
+.venv/bin/pip install --only-binary=llama-cpp-python \
+    --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu -e src/backend
 (cd src/frontend && npm install && npm run build)
+
+# fetch the local models (about 1.2 GB; --no-llm leaves out the 1 GB language model)
+.venv/bin/python -m agfilenet models
 
 # ingest (OCR takes roughly 10–15 s per scanned page on 4 CPU cores)
 .venv/bin/python -m agfilenet ingest
@@ -25,11 +30,14 @@ python3 -m venv .venv
 .venv/bin/python -m agfilenet serve
 ```
 
-The first ingest downloads the OCR and embedding models (about 100 MB) into the
-local model caches; after that no network is needed. Ingest can also be started
+After the models are fetched no network is needed. A feature whose model is
+absent is switched off and the rest of the app works without it. Ingest can also be started
 from the Overview page. Re-running it only reads new or changed files.
 `python -m agfilenet analyse` re-derives metadata from the stored page text
 without repeating OCR (use it after changing the rules in `metadata.py`).
+A database made by an earlier version is brought up to date by itself when the
+server starts (names, summaries, topics and the keyword index are derived from
+the stored page text; progress shows on the Overview page).
 
 The database is a single-process file: stop the server before running `ingest`
 or `analyse` from the command line.
@@ -38,7 +46,11 @@ For front-end development run `npm run dev` in `src/frontend` (Vite proxies
 `/api` to port 8000). Tests: `cd src/backend && ../../.venv/bin/python -m pytest`.
 
 Settings (environment variables): `AGFILENET_DATA` (source folder, default
-`data/`), `AGFILENET_VAR` (database and page-image cache, default `var/`).
+`data/`), `AGFILENET_VAR` (database and page-image cache, default `var/`),
+`AGFILENET_MODELS` (model files, default `var/models`), `AGFILENET_LLM_THREADS`
+(CPU threads for the language model and re-ranker, default 4),
+`AGFILENET_LLM_IDLE` (seconds after which the idle language model leaves
+memory, default 300).
 
 ## Running it in Docker
 
@@ -54,7 +66,8 @@ Overview page, or with `docker compose run --rm app ingest` while the server
 is stopped. Do not run the container and a local server against the same `var`
 at once: the database is opened by one process at a time.
 
-The embedding and OCR models are inside the image, and the container is told
+All the models are inside the image (build with `--build-arg WITH_LLM=0` to
+leave out the language model, which needs about 1.5 GB of memory while in use), and the container is told
 not to contact the model hub, so documents are processed without any network
 access (an ingest under `--network none` works). The port is published on
 127.0.0.1 only because the app has no login; change the `ports` line in
@@ -82,6 +95,31 @@ is imported from the migration workbooks (`workbook.py`).
 Derived values can be corrected on the document page; corrections are kept when
 the metadata is re-derived. `Download metadata (CSV)` exports everything next to
 the workbook's declared values.
+
+**Language processing** — all local, each optional:
+
+- *Dictionary forms* (`textutil.py`, lemminflect): words are indexed under their
+  dictionary form, so “smuggled” finds “smuggling”.
+- *OCR misreadings* (`spelling.py`): a rare non-word one edit away from a single
+  common word of the collection is also indexed under that word. The page text
+  is not changed.
+- *Related words* (`vocabulary.py`): a query word also activates the words of
+  similar meaning that occur in the files (embedding neighbours).
+- *Names* (`ner.py`, `entities.py`): a BERT name-finding model reads every page
+  for people, organisations and places the rules miss; spellings, initials and
+  misreadings of one name are merged into one entry, cautiously (an initial is
+  resolved only when exactly one full name in the same matter fits).
+- *Summary, topic, type of similar files* (`insight.py`): the two most
+  representative sentences of each file, word for word; files grouped by
+  meaning (k-means on embeddings) with a label of characteristic words; and
+  the type of the nearest typed files, offered as a suggestion when it differs.
+  Types corrected by hand count double as examples.
+- *Second reading* (`rerank.py`): in IAC and hybrid mode a cross-encoder reads
+  the best passage of each of the top 12 results against the query and moves
+  their probability up or down. It abstains on queries it cannot judge.
+- *Ask, and deeper search* (`llm.py`): a small language model (Qwen2.5 1.5B,
+  4-bit) answers a question from the five passages most likely to hold the
+  answer, and can suggest other wordings of a search query.
 
 **Storage** (`store.py`) — an object database (ZODB). A `Library` root object owns
 `Document` objects; each document owns its `Page`, `Segment` and `Chunk` objects and
@@ -135,6 +173,14 @@ the curve is fitted to them. *Best* is the Luce choice rule over the returned
 documents plus a “none of these” alternative, so those sum to 100%.
 
 ## Limits
+
+- The language model is small. Its answers are usually right when the passage
+  states the answer plainly, but it can misread a passage or state something
+  that is not there; the Ask page always shows the passages so the answer can
+  be checked. Its suggested wordings for deeper search are of mixed quality.
+- Name merging, topics, summaries and type suggestions are statistical: they
+  are aids to a person's judgement, and none of them overwrites a derived or
+  corrected value.
 
 - OCR is good on typed text and poor on handwriting, stamps and faint faxes;
   low-confidence files are flagged rather than trusted.

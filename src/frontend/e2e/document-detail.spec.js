@@ -283,6 +283,41 @@ test.describe('document page', () => {
     await expect(page.locator('.pager .tag')).toHaveCount(0)
   })
 
+  test('shows the summary, the topic and the type of similar files, which one click puts in the form', async ({ page }) => {
+    await mockDoc(page, fakeDoc({
+      summary: 'The first representative sentence. The second one.', topic: 'needle, thread', suggested_type: 'Memorandum',
+      suggested_conf: 0.82,
+      entities: [{ kind: 'person', value: 'Alex Example', count: 3, first_page: 1, docs: 2, aliases: ['A. Example', 'Alex Exampel'] },
+                 { kind: 'place', value: 'Sampletown', count: 1, first_page: 2, docs: 1, aliases: [] }],
+    }))
+    await page.goto('/documents/999')
+    await expect(card(page, 'Summary')).toContainText('The first representative sentence. The second one.')
+    await expect(card(page, 'Metadata').getByRole('link', { name: 'needle, thread' })).toHaveAttribute('href', '/documents?topic=needle%2C%20thread')
+    await expect(page.locator('.suggestion')).toContainText('The files most like this one are of type Memorandum (82% agreement).')
+    await expect(page.getByRole('button', { name: 'Save corrections' })).toBeDisabled()
+    await page.getByRole('button', { name: 'Use this type' }).click()
+    await expect(page.getByLabel('Type', { exact: true })).toHaveValue('Memorandum')
+    await expect(page.getByRole('button', { name: 'Save corrections' })).toBeEnabled()   // nothing is saved until asked
+    await expect(page.getByRole('button', { name: 'Use this type' })).toHaveCount(0)
+    const found = card(page, 'Found in the text')
+    await expect(found.getByRole('heading', { name: 'Places' })).toBeVisible()
+    await expect(found.locator('.chip').first()).toContainText('+2 spellings')
+    await expect(found.locator('.chip').first()).toHaveAttribute('title', 'Also written: A. Example; Alex Exampel')
+    await expect(found.locator('.chip').nth(1)).not.toContainText('spelling')
+  })
+
+  test('no summary, topic or suggestion: none of them is shown, and a corrected file gets no suggestion', async ({ page }) => {
+    await mockDoc(page, fakeDoc())
+    await page.goto('/documents/999')
+    await expect(page.getByRole('heading', { name: 'Summary' })).toHaveCount(0)
+    await expect(page.locator('.suggestion')).toHaveCount(0)
+    await expect(card(page, 'Metadata')).not.toContainText('Topic')
+    await mockDoc(page, fakeDoc({ edited: true, suggested_type: 'Memorandum', suggested_conf: 0.9 }))
+    await page.reload()
+    await expect(card(page, 'Metadata')).toContainText('corrected by hand')
+    await expect(page.locator('.suggestion')).toHaveCount(0)
+  })
+
   test('an untyped, untitled file with no parties still renders', async ({ page }) => {
     await mockDoc(page, fakeDoc({ title: null, doc_type: null, parties: [], same_file: [], text_source: 'text', ocr_conf: null, flags: [] }))
     await page.goto('/documents/999')

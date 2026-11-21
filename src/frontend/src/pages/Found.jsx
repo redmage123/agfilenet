@@ -17,9 +17,11 @@ const ITEMS = [
   ['Parties', fromDocs((d) => d.parties.map(([name, role]) => `${name} (${role})`))],
   ['People', ofKind('person')],
   ['Organisations', ofKind('org')],
+  ['Places', ofKind('place')],
   ['Court and case numbers', ofKind('case_no')],
   ['File references', ofKind('file_ref')],
   ['Registry volumes', ofKind('registry')],
+  ['Topics', fromDocs((d) => [d.topic])],
   ['Checks raised', fromDocs((d) => d.flags.map(flagLabel))],
 ]
 const distinct = (values) =>

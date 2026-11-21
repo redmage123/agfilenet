@@ -22,7 +22,7 @@ test.describe('document list', () => {
       await expect(row.locator('td').nth(1)).toContainText(d.doc_type || '—')
       await expect(row.locator('td').nth(2)).toHaveText(d.doc_date || '—')
       await expect(row.locator('td').nth(3)).toHaveText(d.matter || '')
-      await expect(row.locator('td').nth(4)).toHaveText(String(d.page_count))
+      await expect(row.locator('td').nth(5)).toHaveText(String(d.page_count))
     }
   })
 
@@ -48,7 +48,7 @@ test.describe('document list', () => {
     await expect(row.locator('.flags')).not.toContainText('pii:')
   })
 
-  for (const [name, label] of [['doc_type', 'Type'], ['matter', 'Matter'], ['flag', 'Check'], ['package', 'Package']]) {
+  for (const [name, label] of [['doc_type', 'Type'], ['matter', 'Matter'], ['topic', 'Topic'], ['flag', 'Check'], ['package', 'Package']]) {
     test(`the ${label} filter offers every value with its count and narrows the list`, async ({ page, corpus }) => {
       await page.goto('/documents')
       const facet = corpus.facets[name]
@@ -92,6 +92,41 @@ test.describe('document list', () => {
     await expect(rows(page).filter({ hasText: target.filename }).first()).toBeVisible()
     await expect(page).toHaveURL(/[?&]q=/)
     await expect(box).toBeFocused()
+  })
+
+  test('the filter menus recount as the list narrows, and values with nothing behind them cannot be picked', async ({ page, corpus, request }) => {
+    // a word from a title that leaves some document types with nothing
+    const words = [...new Set(corpus.docs.flatMap((d) => (d.title || '').toLowerCase().match(/[a-z]{5,}/g) || []))]
+    let needle, facets
+    for (const word of words) {
+      const f = await (await request.get('/api/facets', { params: { q: word } })).json()
+      if (f.doc_type.some((t) => t.count === 0) && f.doc_type.some((t) => t.count > 0)) {
+        needle = word
+        facets = f
+        break
+      }
+    }
+    expect(needle, 'a title word that narrows the document types').toBeTruthy()
+    await page.goto('/documents')
+    await page.getByPlaceholder('Filter by title, file name or matter').fill(needle)
+    const type = select(page, 'Type')
+    const empty = facets.doc_type.find((t) => t.count === 0)
+    const full = facets.doc_type.find((t) => t.count > 0)
+    await expect(type.locator('option', { hasText: `${empty.value} (0)` }).first()).toHaveAttribute('disabled', '')
+    for (const [name, label] of [['doc_type', 'Type'], ['matter', 'Matter'], ['package', 'Package']]) {
+      const shown = (await select(page, label).locator('option').allTextContents()).filter((t) => /\(\d+\)$/.test(t))
+      expect(shown).toEqual(facets[name].map((f) => `${f.value} (${f.count})`))
+    }
+    await type.selectOption(full.value)
+    await expect(rows(page)).toHaveCount(full.count)
+    // its own menu still shows the alternatives; the other menus now count within the chosen type
+    await expect(type.locator('option:checked')).toHaveText(`${full.value} (${full.count})`)
+    const within = await (await request.get('/api/facets', { params: { q: needle, doc_type: full.value } })).json()
+    await expect(select(page, 'Matter').locator('option').nth(1)).toHaveText(`${within.matter[0].value} (${within.matter[0].count})`)
+    expect(within.matter.reduce((n, m) => n + m.count, 0)).toBeLessThanOrEqual(full.count)
+    await page.getByRole('button', { name: 'Clear' }).click()
+    await expect(type.locator('option', { hasText: `${empty.value} (0)` })).toHaveCount(0)
+    await expect(type.locator('option:disabled')).toHaveCount(0)
   })
 
   test('filters combine, survive a reload, and Clear removes them all', async ({ page, corpus }) => {
@@ -143,7 +178,7 @@ test.describe('document list', () => {
   })
 
   test('shows an error when the filter values cannot be loaded', async ({ page }) => {
-    await page.route('**/api/facets', (route) => route.fulfill({ status: 500, body: 'oops' }))
+    await page.route('**/api/facets*', (route) => route.fulfill({ status: 500, body: 'oops' }))
     await page.goto('/documents')
     await expect(page.locator('.error')).toBeVisible()
   })

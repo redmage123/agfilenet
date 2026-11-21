@@ -1,4 +1,5 @@
 """HTTP API and static hosting for the React front end."""
+import contextlib
 import csv
 import io
 from datetime import date
@@ -9,15 +10,26 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, extract, ingest, search, store
+import threading
+import uuid
 
-app = FastAPI(title="AG FileNet migration workbench")
+from . import config, extract, ingest, insight, llm, ner, rerank, search, store
+
+@contextlib.asynccontextmanager
+async def lifespan(_app):
+    ingest.start_upgrade()      # a database from an older version is brought up to date in the background
+    yield
+
+
+app = FastAPI(title="AG FileNet migration workbench", lifespan=lifespan)
+
 
 EDITABLE = ("title", "doc_type", "doc_date", "subject", "matter")
 SUMMARY_FIELDS = ("id", "filename", "path", "package", "folder", "size", "content_type", "page_count",
                   "text_source", "ocr_conf", "status", "error", "title", "doc_type", "doc_type_conf", "doc_date",
                   "subject", "matter", "edited", "decl_matter", "decl_matter_title", "decl_reference",
-                  "decl_doc_type", "decl_comments", "sha256")
+                  "decl_doc_type", "decl_comments", "sha256", "summary", "topic", "suggested_type",
+                  "suggested_conf")
 
 
 def _summary(doc):
@@ -71,6 +83,8 @@ def status():
                        "edited": sum(bool(d.edited) for d in docs)},
             "flags": _flag_counts(lib), "entities": len(lib.entities),
             "duplicate_pages": sum(p.dup_of is not None for d in docs for p in d.pages),
+            # which of the optional local models are installed; the pages hide what cannot work
+            "models": {"names": ner.available(), "reread": rerank.available(), "language": llm.available()},
             "job": job}
 
 
@@ -83,37 +97,53 @@ def start_ingest(body: IngestRequest = IngestRequest()):
     return {"job_id": ingest.start_job(force=body.force)}
 
 
+def _passes(doc, filters, skip=None):
+    """Whether a document passes the list filters, leaving out the one named by `skip`."""
+    for field in ("doc_type", "matter", "package", "topic"):
+        value = filters.get(field)
+        if value and field != skip and (getattr(doc, field) is not None if value == "(none)"
+                                        else getattr(doc, field) != value):
+            return False
+    if filters.get("flag") and skip != "flag" and filters["flag"] not in doc.flags:
+        return False
+    q = filters.get("q")
+    return not q or any(q.lower() in (getattr(doc, f) or "").lower() for f in ("title", "filename", "matter"))
+
+
 @app.get("/api/facets")
-def facets():
+def facets(doc_type: Optional[str] = None, matter: Optional[str] = None, package: Optional[str] = None,
+           flag: Optional[str] = None, topic: Optional[str] = None, q: Optional[str] = None):
+    """Every value of each filter, with how many documents choosing it would list.
+
+    A filter's own counts take the other filters and the text box into account,
+    but not its own current choice, so the alternatives to it stay visible.
+    """
+    filters = {"doc_type": doc_type, "matter": matter, "package": package, "flag": flag, "topic": topic, "q": q}
     with store.Session() as s:
         docs = list(s.lib.documents.values())
 
-        def group(field):
-            counts = {}
+        def group(name, values_of):
+            totals, counts = {}, {}
             for d in docs:
-                value = getattr(d, field)
-                if value is not None:
-                    counts[value] = counts.get(value, 0) + 1
-            return [{"value": k, "count": v} for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
-        return {"doc_type": group("doc_type"), "matter": group("matter"), "package": group("package"),
-                "flag": [{"value": k, "count": v}
-                         for k, v in sorted(_flag_counts(s.lib).items(), key=lambda kv: -kv[1])]}
+                passes = _passes(d, filters, skip=name)
+                for value in values_of(d):
+                    totals[value] = totals.get(value, 0) + 1
+                    counts[value] = counts.get(value, 0) + passes
+            # ordered by the overall totals so the menus do not reshuffle while filtering
+            return [{"value": k, "count": counts[k]} for k, _v in sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+        def field(name):
+            return group(name, lambda d: [getattr(d, name)] if getattr(d, name) is not None else [])
+        return {"doc_type": field("doc_type"), "matter": field("matter"), "package": field("package"),
+                "topic": field("topic"), "flag": group("flag", lambda d: d.flags)}
 
 
 @app.get("/api/documents")
 def list_documents(doc_type: Optional[str] = None, matter: Optional[str] = None, package: Optional[str] = None,
-                   flag: Optional[str] = None, q: Optional[str] = None):
+                   flag: Optional[str] = None, topic: Optional[str] = None, q: Optional[str] = None):
+    filters = {"doc_type": doc_type, "matter": matter, "package": package, "flag": flag, "topic": topic, "q": q}
     with store.Session() as s:
-        out = []
-        for doc in s.lib.documents.values():
-            if any(value and (getattr(doc, field) is not None if value == "(none)" else getattr(doc, field) != value)
-                   for field, value in (("doc_type", doc_type), ("matter", matter), ("package", package))):
-                continue
-            if flag and flag not in doc.flags:
-                continue
-            if q and not any(q.lower() in (getattr(doc, f) or "").lower() for f in ("title", "filename", "matter")):
-                continue
-            out.append(_summary(doc))
+        out = [_summary(doc) for doc in s.lib.documents.values() if _passes(doc, filters)]
         return sorted(out, key=lambda d: (d["package"] or "", d["folder"] or "", d["filename"]))
 
 
@@ -135,6 +165,7 @@ def _detail(lib, doc):
         segments=[{"start_page": g.start_page, "end_page": g.end_page, "doc_type": g.doc_type}
                   for g in doc.segments],
         entities=sorted(({"kind": m.entity.kind, "value": m.entity.value, "count": m.count,
+                          "aliases": list(m.entity.aliases),
                           "first_page": m.first_page, "docs": len(m.entity.documents)} for m in doc.mentions),
                         key=lambda e: (e["kind"], -e["count"])),
         same_file=[{"id": o.id, "filename": o.filename, "path": o.path} for o in lib.documents.values()
@@ -175,6 +206,9 @@ def patch_document(doc_id: int, body: DocumentPatch):
             setattr(doc, field, value)
         if changes:
             doc.edited = True
+            if "doc_type" in changes:
+                # a corrected type is an example the suggestions for the other files learn from
+                insight.refresh(s.lib, summaries=False)
             s.lib.touch()
         return _detail(s.lib, doc)
 
@@ -202,10 +236,68 @@ def source_file(doc_id: int):
 
 
 @app.get("/api/search")
-def run_search(q: str = "", mode: str = "iac", limit: int = Query(25, ge=1, le=200)):
+def run_search(q: str = "", mode: str = "iac", limit: int = Query(25, ge=1, le=200), reread: bool = True,
+               deep: bool = False):
+    """`deep` asks the language model for other wordings of the query and searches for those too."""
     if mode not in search.MODES:
         raise HTTPException(400, f"mode must be one of {', '.join(search.MODES)}")
-    return search.search(q, mode=mode, limit=limit)
+    also = llm.rewordings(q.strip()) if deep and mode == "iac" and q.strip() else ()
+    return search.search(q, mode=mode, limit=limit, reread=reread, also=also)
+
+
+# --- questions -----------------------------------------------------------------
+# Answers take the language model up to a minute, so a question is answered in
+# the background: the passages come back at once, the answer is collected later.
+_answers = {}                   # id -> {"status", "answer"}; a handful of recent ones, held in memory only
+_answers_lock = threading.Lock()
+KEEP_ANSWERS = 50
+
+
+class Question(BaseModel):
+    question: str
+
+
+def _write_answer(key, question, texts):
+    try:
+        answer = llm.answer(question, texts)
+        result = {"status": "done" if answer else "failed", "answer": answer}
+    except Exception as exc:
+        result = {"status": "failed", "answer": None, "error": repr(exc)[:200]}
+    with _answers_lock:
+        _answers[key] = result
+
+
+@app.post("/api/ask")
+def ask(body: Question):
+    """Find the passages that bear on a question and have the local language model answer from them."""
+    question = body.question.strip()
+    if not question:
+        raise HTTPException(422, "ask a question")
+    sources = search.passages(question)
+    key = uuid.uuid4().hex
+    if not sources:
+        state = {"status": "done", "answer": None}
+    elif not llm.available():
+        state = {"status": "unavailable", "answer": None}
+    else:
+        state = {"status": "thinking", "answer": None}
+    with _answers_lock:
+        _answers[key] = state
+        for old in list(_answers)[:-KEEP_ANSWERS]:
+            del _answers[old]
+    if state["status"] == "thinking":
+        threading.Thread(target=_write_answer, args=(key, question, [s["text"] for s in sources]),
+                         daemon=True).start()
+    return {"id": key, "question": question, "sources": sources, **state}
+
+
+@app.get("/api/ask/{key}")
+def ask_result(key: str):
+    with _answers_lock:
+        state = _answers.get(key)
+    if state is None:
+        raise HTTPException(404, "that question is no longer held; ask it again")
+    return state
 
 
 class Feedback(BaseModel):
@@ -255,6 +347,7 @@ def database_contents():
                          "parties": list(m.parties), "documents": matter_files.get(m.number, 0)}
                         for m in lib.matters.values()],
             "entities": sorted(({"id": e.id, "kind": e.kind, "value": e.value, "documents": len(e.documents),
+                                 "aliases": list(e.aliases),
                                  "mentions": mentions.get(e.id, 0)} for e in lib.entities.values()),
                                key=lambda e: (e["kind"], -e["documents"], e["value"])),
             "judgements": sorted(({"query": j.query, "doc_id": j.document.id,
@@ -269,12 +362,12 @@ def export_csv():
     """Derived metadata next to what the migration workbook declared, one row per file."""
     columns = ["path", "filename", "page_count", "matter", "title", "doc_type", "doc_type_conf", "doc_date",
                "subject", "text_source", "ocr_conf", "sha256", "edited", "decl_matter", "decl_matter_title",
-               "decl_reference", "decl_doc_type", "decl_comments"]
-    kinds = ("person", "org", "case_no", "file_ref")
+               "decl_reference", "decl_doc_type", "decl_comments", "suggested_type", "topic", "summary"]
+    kinds = ("person", "org", "case_no", "file_ref", "place")
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(columns + ["parties", "flags", "segments", "people", "organisations", "case_numbers",
-                               "file_references"])
+                               "file_references", "places"])
     with store.Session() as s:
         for doc in sorted(s.lib.documents.values(), key=lambda d: d.path):
             mentions = sorted(doc.mentions, key=lambda m: -m.count)

@@ -24,6 +24,8 @@ from .textutil import tokens
 
 
 class Page(Persistent):
+    names = None                        # [(kind, text, confidence)] from the name-finding model; None = not yet read
+
     def __init__(self, document, page_no, text, source, ocr_conf=None, rotation=0):
         self.document = document
         self.page_no = page_no
@@ -64,7 +66,9 @@ class Mention(Persistent):
 
 
 class Entity(Persistent):
-    """A person, organisation, case number, file reference or registry volume."""
+    """A person, organisation, place, case number, file reference or registry volume."""
+
+    aliases = ()                        # other spellings found for the same name
 
     def __init__(self, entity_id, kind, value, norm):
         self.id = entity_id
@@ -86,6 +90,13 @@ class Matter(Persistent):
 
 
 class Document(Persistent):
+    # derived by the models after indexing; class defaults serve documents stored before these existed
+    summary = None                      # the two or three sentences that best stand for the whole file
+    summary_of = None                   # sha256 of the file the summary was made from
+    topic = None                        # label of the group of similar files this one falls in
+    suggested_type = None               # type of the most similar files, when it differs from doc_type
+    suggested_conf = None
+
     def __init__(self, doc_id, path, filename):
         self.id = doc_id
         self.path = path                # relative to the data directory
@@ -153,15 +164,25 @@ class TextIndex(Persistent):
     """Inverted index over chunks with Okapi BM25 ranking."""
 
     K1, B = 1.2, 0.75
+    TERMS = 2                           # bumped when the way text becomes terms changes
+    version = 1                         # what an index stored before versions existed was built with
+    corrections = {}                    # OCR misreading -> intended term, indexed alongside it
 
-    def __init__(self):
+    def __init__(self, corrections=None):
         self.postings = OOBTree()       # term -> IIBTree {chunk id: term frequency}
         self.lengths = IIBTree()        # chunk id -> number of indexed tokens
         self.total_length = 0
+        self.version = self.TERMS
+        self.corrections = dict(corrections or {})
+
+    def terms(self, text, keep_stop=False):
+        """The terms a text is indexed under: its words, plus the intended word for each misreading."""
+        out = tokens(text, keep_stop)
+        return out + [self.corrections[t] for t in out if t in self.corrections]
 
     def add(self, chunk_id, text):
         counts = defaultdict(int)
-        for t in tokens(text):
+        for t in self.terms(text):
             counts[t] += 1
         for term, tf in counts.items():
             posting = self.postings.get(term)
@@ -175,7 +196,7 @@ class TextIndex(Persistent):
     def remove(self, chunk_id, text):
         if chunk_id not in self.lengths:
             return
-        for term in set(tokens(text)):
+        for term in set(self.terms(text)):
             posting = self.postings.get(term)
             if posting is not None and chunk_id in posting:
                 del posting[chunk_id]
@@ -256,6 +277,12 @@ class Library(Persistent):
         self.chunks[chunk.id] = chunk
         self.text_index.add(chunk.id, text)
         return chunk
+
+    def reindex_text(self, corrections):
+        """Rebuild the keyword index from the stored passages (no OCR or embedding involved)."""
+        self.text_index = TextIndex(corrections)
+        for chunk in self.chunks.values():
+            self.text_index.add(chunk.id, chunk.text)
 
     def clear_chunks(self, doc):
         for chunk in doc.chunks:

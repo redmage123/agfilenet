@@ -5,6 +5,7 @@ import Found from './pages/Found.jsx'
 import Documents from './pages/Documents.jsx'
 import DocumentDetail from './pages/DocumentDetail.jsx'
 import Search from './pages/Search.jsx'
+import Ask from './pages/Ask.jsx'
 import { useTitle } from './title.js'
 
 export default function App() {
@@ -16,6 +17,7 @@ export default function App() {
           <NavLink to="/" end>Overview</NavLink>
           <NavLink to="/documents">Documents</NavLink>
           <NavLink to="/search">Search</NavLink>
+          <NavLink to="/ask">Ask</NavLink>
           <NavLink to="/database">Database</NavLink>
         </nav>
       </header>
@@ -25,6 +27,7 @@ export default function App() {
           <Route path="/documents" element={<Documents />} />
           <Route path="/documents/:id" element={<DocumentDetail />} />
           <Route path="/search" element={<Search />} />
+          <Route path="/ask" element={<Ask />} />
           <Route path="/database" element={<Database />} />
           <Route path="/database/found" element={<Found />} />
           <Route path="*" element={<NotFound />} />

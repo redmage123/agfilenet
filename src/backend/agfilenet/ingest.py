@@ -2,11 +2,12 @@
 import hashlib
 import re
 import threading
+from collections import Counter
 from datetime import datetime, timezone
 from urllib.parse import unquote
 
-from . import config, embed, extract, metadata, store, workbook
-from .textutil import chunk_text, norm_name, tokens
+from . import config, embed, entities, extract, insight, metadata, ner, spelling, store, vocabulary, workbook
+from .textutil import chunk_text, norm_name, tokens, written_forms
 
 LOW_OCR_CONF = 0.85
 DUP_JACCARD = 0.8
@@ -179,6 +180,7 @@ def analyse(lib):
             if len(name.split()) >= 2:
                 gazetteer.setdefault(norm_name(name), name)
 
+    per_doc = []
     for doc, meta in results:
         found = {}  # (kind, norm) -> [value, count, first page]
 
@@ -196,9 +198,64 @@ def analyse(lib):
             for norm, value in gazetteer.items():
                 if f" {norm} " in text:
                     note("org" if ORG_WORDS.search(value) else "person", value, page.page_no)
-        for (kind, norm), (value, count, first_page) in found.items():
-            lib.link(doc, lib.entity(kind, value, norm), count, first_page)
+            # names the model read on this page; the rules and the gazetteer have already counted theirs
+            seen = set()
+            for kind, value, _confidence in page.names or ():
+                value = entities.clean(kind, value)
+                key = value and (kind, norm_name(value))
+                if key and key not in seen and not any(k[1] == key[1] for k in found if k[0] != kind):
+                    seen.add(key)
+                    if key not in found:
+                        note(kind, value, page.page_no)
+        per_doc.append((doc, found))
+
+    # A name read in one file is looked for, as written, in the others: the model misses some mentions.
+    known = {key: value for _doc, found in per_doc for key, (value, _c, _p) in found.items()
+             if key[0] in ("person", "org") and len(key[1]) >= 8 and len(key[1].split()) >= 2}
+    for doc, found in per_doc:
+        taken = {key[1] for key in found}
+        for page in doc.pages:
+            text = " " + norm_name(page.text or "") + " "
+            for key, value in known.items():
+                if key[1] not in taken and f" {key[1]} " in text:
+                    found.setdefault(key, [value, 0, page.page_no])[1] += text.count(f" {key[1]} ")
+
+    # Different spellings of one name, in the same file or matter, become one entity.
+    names = {}
+    for doc, found in per_doc:
+        for key, (_value, count, _page) in found.items():
+            if key[0] in ("person", "org"):
+                entry = names.setdefault(key, {"count": 0, "where": set()})
+                entry["count"] += count
+                entry["where"].update({("doc", doc.id), ("matter", doc.matter)} - {("matter", None)})
+    stored_as = entities.cluster(names)
+    spelling_of = {key: value for _doc, found in per_doc for key, (value, _c, _p) in found.items()}
+    for doc, found in per_doc:
+        merged = {}
+        for key, (value, count, first_page) in found.items():
+            main = stored_as.get(key, key)
+            entry = merged.setdefault(main, [0, first_page])
+            entry[0], entry[1] = entry[0] + count, min(entry[1], first_page)
+            if main != key:
+                entity = lib.entity(main[0], spelling_of[main], main[1])
+                if value not in entity.aliases:
+                    entity.aliases = sorted({*entity.aliases, value})
+        for (kind, norm), (count, first_page) in merged.items():
+            lib.link(doc, lib.entity(kind, spelling_of[(kind, norm)], norm), count, first_page)
     lib.touch()
+
+
+def read_names(lib, commit=None):
+    """Run the name-finding model over pages it has not read yet."""
+    if not ner.available():
+        return
+    for doc in lib.ok_documents():
+        for page in doc.pages:
+            if page.names is None:
+                page.names = ner.find(page.text or "")
+        if commit:
+            commit()
+    ner.unload()
 
 
 def index_chunks(lib, commit=None):
@@ -214,6 +271,17 @@ def index_chunks(lib, commit=None):
         if commit:
             commit()
     lib.touch()
+
+
+def refresh_text_index(lib):
+    """Rebuild the keyword index if the misreadings found, or the way words are reduced, have changed."""
+    counts = Counter()
+    for chunk in lib.chunks.values():
+        counts.update(tokens(chunk.text))
+    corrections = spelling.corrections(counts)
+    if corrections != lib.text_index.corrections or lib.text_index.version != store.TextIndex.TERMS:
+        lib.reindex_text(corrections)
+        lib.touch()
 
 
 def run(force=False, job_id=None):
@@ -253,10 +321,16 @@ def run(force=False, job_id=None):
             status(message=f"Reading {path.name} ({i + 1}/{len(files)})")
             _read_file(lib, path, declared, tick)
             status(done=done[0])
-        status(message="Deriving metadata", done=total)
+        status(message="Finding names", done=total)
+        read_names(lib, session.commit)
+        status(message="Deriving metadata")
         analyse(lib)
         status(message="Building search index")
         index_chunks(lib, session.commit)
+        refresh_text_index(lib)
+        status(message="Summarising and grouping")
+        insight.refresh(lib)
+        vocabulary.learn(written_forms(c.text for c in lib.chunks.values()).values())
         status(status="done", message=f"Ingested {len(files)} files, {total} pages", finished=now())
         store.database().pack()
     except Exception as exc:
@@ -267,6 +341,60 @@ def run(force=False, job_id=None):
         session.abort()
         session.conn.close()
         _job_lock.release()
+
+
+def needs_upgrade(lib):
+    """Whether the database was built by a version that lacked what the models now derive."""
+    docs = [d for d in lib.ok_documents() if len(d.chunks)]
+    return bool(docs) and (lib.text_index.version != store.TextIndex.TERMS
+                           or any(d.summary_of != d.sha256 for d in docs)
+                           or (ner.available() and any(p.names is None for d in docs for p in d.pages)))
+
+
+def upgrade(job_id=None):
+    """Derive what is missing from the stored page text. The source files are not consulted."""
+    if not _job_lock.acquire(blocking=False):
+        return
+    session = store.Session()
+    lib = session.lib
+    job = lib.jobs.get(job_id) if job_id else None
+
+    def status(**fields):
+        if job is not None:
+            for key, value in fields.items():
+                setattr(job, key, value)
+        session.commit()
+
+    try:
+        if needs_upgrade(lib):
+            status(status="running", message="Updating the search index")
+            refresh_text_index(lib)
+            status(message="Finding names")
+            read_names(lib, session.commit)
+            status(message="Deriving metadata")
+            analyse(lib)
+            status(message="Summarising and grouping")
+            insight.refresh(lib)
+            vocabulary.learn(written_forms(c.text for c in lib.chunks.values()).values())
+        status(status="done", message="Brought up to date", finished=now())
+    except Exception as exc:
+        session.abort()
+        status(status="error", message=repr(exc)[:500], finished=now())
+        raise
+    finally:
+        session.abort()
+        session.conn.close()
+        _job_lock.release()
+
+
+def start_upgrade():
+    """Called when the server starts: bring an older database up to date in the background."""
+    with store.Session() as s:
+        if running() or not needs_upgrade(s.lib):
+            return None
+    job_id = new_job()
+    threading.Thread(target=upgrade, kwargs={"job_id": job_id}, daemon=True).start()
+    return job_id
 
 
 def new_job():

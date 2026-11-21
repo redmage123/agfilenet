@@ -19,12 +19,19 @@ export default function Search() {
   const [picked, setPicked] = useState('iac')
   const urlMode = MODES.some((m) => m[0] === params.get('mode')) ? params.get('mode') : null
   const mode = urlMode || (q ? 'iac' : picked)
+  const deep = params.get('deep') === '1'
   const [text, setText] = useState(q)
+  const [models, setModels] = useState({})
   useTitle(q ? `${q} – Search` : 'Search')
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [judged, setJudged] = useState({})
+
+  useEffect(() => {
+    // which of the optional models are installed decides what this page offers
+    api.status().then((s) => setModels(s.models || {})).catch(() => {})
+  }, [])
 
   useEffect(() => {
     setText(q)
@@ -38,7 +45,7 @@ export default function Search() {
     setLoading(true)
     setError(null)
     api
-      .search(q, mode)
+      .search(q, mode, deep && mode === 'iac')
       .then((d) => !stale && setData(d))
       .catch((e) => {
         if (stale) return
@@ -49,11 +56,13 @@ export default function Search() {
     return () => {
       stale = true
     }
-  }, [q, mode])
+  }, [q, mode, deep])
 
-  const go = (nextQ, nextMode) => {
+  const [wantDeep, setWantDeep] = useState(deep)
+  const go = (nextQ, nextMode, nextDeep = wantDeep) => {
     setPicked(nextMode)
-    setParams(nextQ ? { q: nextQ, mode: nextMode } : {})
+    setWantDeep(nextDeep)
+    setParams(nextQ ? { q: nextQ, mode: nextMode, ...(nextDeep && nextMode === 'iac' ? { deep: '1' } : {}) } : {})
   }
   const judge = (hit, relevant) => {
     api
@@ -97,9 +106,16 @@ export default function Search() {
         ))}
       </div>
       <p className="muted">{modeInfo[2]}</p>
+      {mode === 'iac' && models.language && (
+        <label className="toggle">
+          <input type="checkbox" checked={wantDeep} onChange={(e) => go(q || text.trim(), mode, e.target.checked)} />{' '}
+          Deeper search: have the language model suggest other wordings of the query and look for those as well{' '}
+          <span className="muted">(adds 10–30 seconds)</span>
+        </label>
+      )}
 
       {error && <p className="error">{error}</p>}
-      {loading && <p className="muted">Searching…</p>}
+      {loading && <p className="muted">{deep && mode === 'iac' ? 'Thinking of other wordings, then searching…' : 'Searching…'}</p>}
 
       {data && !loading && (
         <>
@@ -111,6 +127,23 @@ export default function Search() {
               Chance that none of these is what you want: {percent(data.p_none)}.
             </span>
           </p>
+          {data.network?.expanded?.length > 0 && (
+            <p className="muted related-words">
+              Also looked for words of similar meaning found in the files:{' '}
+              {data.network.expanded.map((e) => `${e.term} (for ${e.from})`).join(', ')}.
+            </p>
+          )}
+          {data.also?.length > 0 && (
+            <p className="muted other-wordings">
+              Also searched for these other wordings, suggested by the language model: {data.also.join('; ')}.
+            </p>
+          )}
+          {data.reread > 0 && (
+            <p className="muted second-reading">
+              The top {data.reread} {data.reread > 1 ? 'results were' : 'result was'} read a second time against the
+              query by a re-ranking model, which moved {data.reread > 1 ? 'their' : 'its'} probability up or down.
+            </p>
+          )}
           <ol className="results">
             {data.results.map((hit) => (
               <li key={hit.id} className="result">
@@ -140,7 +173,9 @@ export default function Search() {
                     </p>
                   )}
                   {mode === 'iac' && !hit.matched_text && hit.why.some((w) => w.kind !== 'semantic') && (
-                    <p className="notice">Does not contain the search words — reached through linked information.</p>
+                    <p className="notice">
+                      Does not contain the search words — reached through related words or linked information.
+                    </p>
                   )}
                   {hit.why.length > 0 && (
                     <div className="chips">
@@ -155,6 +190,11 @@ export default function Search() {
                     {hit.activation != null && <span>activation {hit.activation.toFixed(2)}</span>}
                     {hit.keyword_score != null && <span>keyword {hit.keyword_score.toFixed(1)}</span>}
                     {hit.semantic_score != null && <span>similarity {hit.semantic_score.toFixed(2)}</span>}
+                    {hit.reread != null && (
+                      <span title="How well the re-ranking model judged the best passage to answer the query (0 to 1), and the probability before it was applied">
+                        second reading {hit.reread.toFixed(2)} (was {percent(hit.first_probability)})
+                      </span>
+                    )}
                     <Flags flags={hit.flags.filter((f) => f.startsWith('pii') || f.startsWith('sensitive'))} />
                     <span className="judge">
                       {judged[hit.id] === undefined ? (

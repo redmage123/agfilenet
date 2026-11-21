@@ -29,12 +29,14 @@ const query = (params) => {
 export const api = {
   status: () => request('/api/status'),
   ingest: (force) => request('/api/ingest', json('POST', { force })),
-  facets: () => request('/api/facets'),
+  facets: (filters = {}) => request(`/api/facets?${query(filters)}`),
   database: () => request('/api/database'),
   documents: (filters) => request(`/api/documents?${query(filters)}`),
   document: (id) => request(`/api/documents/${id}`),
   saveDocument: (id, changes) => request(`/api/documents/${id}`, json('PATCH', changes)),
-  search: (q, mode) => request(`/api/search?${query({ q, mode })}`),
+  search: (q, mode, deep) => request(`/api/search?${query({ q, mode, deep: deep ? 'true' : '' })}`),
+  ask: (question) => request('/api/ask', json('POST', { question })),
+  askResult: (id) => request(`/api/ask/${id}`),
   feedback: (body) => request('/api/feedback', json('POST', body)),
 }
 

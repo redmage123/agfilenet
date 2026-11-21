@@ -30,7 +30,7 @@ h3 { font-size: 13px; margin: 12px 0 6px; color: var(--muted); font-weight: 600;
   padding: 10px 24px; background: #12283f; color: #fff;
 }
 .brand { font-weight: 600; }
-.topbar nav { display: flex; gap: 4px; }
+.topbar nav { display: flex; gap: 4px; flex-wrap: wrap; }
 .topbar a { color: #cfdcea; padding: 6px 12px; border-radius: 6px; }
 .topbar a.active { background: #26476b; color: #fff; }
 main { max-width: 1320px; margin: 0 auto; padding: 16px 24px 48px; }
@@ -132,3 +132,8 @@ mark { background: #ffe9a8; padding: 0 2px; border-radius: 2px; }
 details summary { cursor: pointer; color: var(--accent); }
 .units { margin-top: 10px; max-width: 640px; }
 .units td { padding: 4px 12px; font-size: 13px; }
+
+.answer-text { font-size: 16px; white-space: pre-wrap; margin: 0 0 10px; }
+.sources { margin: 0; padding-left: 22px; display: grid; gap: 10px; }
+.summary { margin: 0 0 6px; font-size: 14px; }
+.suggestion { background: var(--accent-soft); padding: 6px 10px; border-radius: 6px; font-size: 13px; margin: 0 0 9px; }

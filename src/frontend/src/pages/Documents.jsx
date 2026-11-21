@@ -7,6 +7,7 @@ import { useTitle } from '../title.js'
 const FILTERS = [
   ['doc_type', 'Type'],
   ['matter', 'Matter'],
+  ['topic', 'Topic'],
   ['flag', 'Check'],
   ['package', 'Package'],
 ]
@@ -21,9 +22,8 @@ export default function Documents() {
   useTitle('Documents')
 
   useEffect(() => {
-    api.facets().then(setFacets).catch((e) => setError(e.message))
-  }, [])
-  useEffect(() => {
+    // the counts in the filter menus follow the other filters and the text box
+    api.facets(filters).then(setFacets).catch((e) => setError(e.message))
     api.documents(filters).then(setDocs).catch((e) => setError(e.message))
   }, [key])
 
@@ -55,7 +55,7 @@ export default function Documents() {
                 <option value="">All</option>
                 {name === 'doc_type' && <option value="(none)">(not identified)</option>}
                 {facets[name].map((f) => (
-                  <option key={f.value} value={f.value}>
+                  <option key={f.value} value={f.value} disabled={f.count === 0 && filters[name] !== f.value}>
                     {name === 'flag' ? flagLabel(f.value) : f.value} ({f.count})
                   </option>
                 ))}
@@ -84,6 +84,7 @@ export default function Documents() {
                 <th>Type</th>
                 <th>Date</th>
                 <th>Matter</th>
+                <th>Topic</th>
                 <th className="num">Pages</th>
               </tr>
             </thead>
@@ -101,9 +102,11 @@ export default function Documents() {
                     {d.decl_doc_type && d.decl_doc_type !== d.doc_type && (
                       <div className="sub">workbook: {d.decl_doc_type}</div>
                     )}
+                    {d.suggested_type && <div className="sub">similar files: {d.suggested_type}</div>}
                   </td>
                   <td className="nowrap">{d.doc_date || <span className="muted">—</span>}</td>
                   <td>{d.matter}</td>
+                  <td>{d.topic || <span className="muted">—</span>}</td>
                   <td className="num">{d.page_count}</td>
                 </tr>
               ))}

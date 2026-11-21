@@ -19,16 +19,26 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/src/backend \
     FASTEMBED_CACHE_PATH=/opt/models \
+    MALLOC_ARENA_MAX=2 \
     AGFILENET_DATA=/data \
     AGFILENET_VAR=/var/lib/agfilenet
 
 WORKDIR /app
 COPY src/backend/requirements.txt src/backend/requirements.txt
-RUN pip install --no-cache-dir -r src/backend/requirements.txt
+# the extra index has prebuilt CPU wheels of llama-cpp-python, so no compiler is needed
+RUN pip install --no-cache-dir --only-binary=llama-cpp-python \
+        --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
+        -r src/backend/requirements.txt
 
-# Fetch the embedding model while building, so the running container never
-# needs the network: documents are read, OCR'd and embedded inside it.
-RUN python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5')" \
+# Fetch the models while building, so the running container never needs the
+# network: documents are read, OCR'd, embedded and answered about inside it.
+# Only the two files that say which models are copied first, so that a change
+# to the code does not download them again. WITH_LLM=0 leaves out the language
+# model (about 1 GB); "Ask" and "deeper search" are then switched off.
+ARG WITH_LLM=1
+COPY src/backend/agfilenet/__init__.py src/backend/agfilenet/config.py src/backend/agfilenet/models.py \
+     src/backend/agfilenet/
+RUN python -c "from agfilenet import models; models.fetch_all(llm='${WITH_LLM}' == '1')" \
     && chmod -R a+rX /opt/models
 ENV HF_HUB_OFFLINE=1
 

@@ -17,6 +17,7 @@ const UNSAVED = 'This document has unsaved corrections. Leave without saving the
 const KIND_LABELS = {
   person: 'People',
   org: 'Organisations',
+  place: 'Places',
   case_no: 'Court and case numbers',
   file_ref: 'File references',
   registry: 'Registry volumes',
@@ -120,6 +121,17 @@ export default function DocumentDetail() {
                   <input value={form[k]} onChange={(e) => setForm({ ...form, [k]: e.target.value })} />
                 </label>
               ))}
+              {doc.suggested_type && !doc.edited && (
+                <p className="suggestion">
+                  The files most like this one are of type <strong>{doc.suggested_type}</strong>
+                  {doc.suggested_conf != null && ` (${Math.round(doc.suggested_conf * 100)}% agreement)`}.{' '}
+                  {form.doc_type !== doc.suggested_type && (
+                    <button type="button" className="link" onClick={() => setForm({ ...form, doc_type: doc.suggested_type })}>
+                      Use this type
+                    </button>
+                  )}
+                </p>
+              )}
               {saveError && (
                 <p className="error" role="alert">
                   {saveError}
@@ -133,6 +145,14 @@ export default function DocumentDetail() {
               </p>
             )}
             <dl className="facts">
+              {doc.topic && (
+                <>
+                  <dt>Topic</dt>
+                  <dd>
+                    <Link to={`/documents?topic=${encodeURIComponent(doc.topic)}`}>{doc.topic}</Link>
+                  </dd>
+                </>
+              )}
               <dt>Type confidence</dt>
               <dd>{doc.doc_type ? `${Math.round(doc.doc_type_conf * 100)}% of typed pages agree` : 'not identified'}</dd>
               <dt>Text from</dt>
@@ -149,6 +169,14 @@ export default function DocumentDetail() {
               </dd>
             </dl>
           </section>
+
+          {doc.summary && (
+            <section className="card">
+              <h2>Summary</h2>
+              <p className="summary">{doc.summary}</p>
+              <p className="sub">Sentences taken word for word from the file, chosen as the most representative of it.</p>
+            </section>
+          )}
 
           <section className="card">
             <h2>Declared in the workbook</h2>
@@ -213,8 +241,14 @@ export default function DocumentDetail() {
                   <h3>{label}</h3>
                   <div className="chips">
                     {list.map((e) => (
-                      <Link key={e.kind + e.value} className="chip" to={`/search?q=${encodeURIComponent(e.value)}`}>
+                      <Link
+                        key={e.kind + e.value}
+                        className="chip"
+                        to={`/search?q=${encodeURIComponent(e.value)}`}
+                        title={e.aliases?.length ? `Also written: ${e.aliases.join('; ')}` : undefined}
+                      >
                         {e.value}
+                        {e.aliases?.length > 0 && <span className="chip-n">+{e.aliases.length} spelling{e.aliases.length > 1 ? 's' : ''}</span>}
                         {e.docs > 1 && <span className="chip-n">{e.docs} files</span>}
                       </Link>
                     ))}

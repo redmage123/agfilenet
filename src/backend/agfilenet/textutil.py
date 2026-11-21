@@ -1,6 +1,8 @@
 """Small text helpers shared by metadata extraction and search."""
+import functools
 import re
 
+import lemminflect
 import wordninja
 
 STOPWORDS = frozenset("""
@@ -37,11 +39,26 @@ def unglue(text):
     return _LONG_ALPHA.sub(fix, text)
 
 
+def is_word(token):
+    """Whether the dictionary knows this (lowercase) word in some form."""
+    return token in STOPWORDS or bool(lemminflect.getAllLemmas(token))
+
+
+@functools.lru_cache(maxsize=200_000)
 def stem(token):
-    """Very light plural/possessive stemmer; enough to match 'summons'/'mortgages'."""
+    """The dictionary form of a word, so 'smuggled', 'smuggles' and 'smuggling' are one term.
+
+    Words the dictionary lacks (names, references, OCR misreadings) only lose a
+    plural or possessive ending.
+    """
     t = token.lower().replace("’", "'")
     if t.endswith("'s"):
         t = t[:-2]
+    if t.isascii() and t.isalpha():
+        forms = lemminflect.getAllLemmas(t)
+        lemmas = [lemma for pos in ("VERB", "NOUN", "ADJ") for lemma in forms.get(pos, ()) if lemma.isalpha()]
+        if lemmas:
+            return min(lemmas, key=len).lower()   # 'building' -> 'build', 'damages' -> 'damage'
     if len(t) > 4 and t.endswith("ies"):
         return t[:-3] + "y"
     if len(t) > 4 and t.endswith(("ches", "shes", "xes", "zes", "sses")):
@@ -51,16 +68,31 @@ def stem(token):
     return t
 
 
-def tokens(text, keep_stop=False):
+def words(text, keep_stop=False):
+    """[(term, the word as written, lowercase)] for the words of a text that are worth indexing."""
     out = []
     for m in _WORD.finditer(text):
         t = stem(m.group(0))
         if len(t) < 2 and not t.isdigit():
             continue
-        if not keep_stop and t in STOPWORDS:
+        if not keep_stop and (t in STOPWORDS or m.group(0).lower() in STOPWORDS):
             continue
-        out.append(t)
+        out.append((t, m.group(0).lower()))
     return out
+
+
+def tokens(text, keep_stop=False):
+    return [t for t, _written in words(text, keep_stop)]
+
+
+def written_forms(texts):
+    """{term: the form it is most often written in} over some texts ('smuggle' -> 'smuggling')."""
+    forms = {}
+    for text in texts:
+        for term, written in words(text):
+            counts = forms.setdefault(term, {})
+            counts[written] = counts.get(written, 0) + 1
+    return {term: max(sorted(counts), key=counts.get) for term, counts in forms.items()}
 
 
 def norm_name(text):
