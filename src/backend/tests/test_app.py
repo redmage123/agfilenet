@@ -144,3 +144,18 @@ def test_feedback_export_status(client):
     assert {"value": "LEG/1/1", "count": 2} in facets["matter"]
     filtered = client.get("/api/documents", params={"flag": "pii:passport"}).json()
     assert [d["filename"] for d in filtered] == ["conveyance.pdf"]
+
+
+def test_database_listing_matches_what_is_stored(client):
+    doc_id = by_name(client)["writ.pdf"]["id"]
+    client.post("/api/feedback", json={"query": "thompson", "doc_id": doc_id, "relevant": False, "activation": 0.2})
+    db = client.get("/api/database").json()
+    assert db["counts"]["documents"] == len(db["documents"]) == 3
+    assert db["counts"]["entities"] == len(db["entities"]) > 0
+    assert db["counts"]["pages"] == 4 and db["counts"]["chunks"] > 0 and db["file"]["size"] > 0
+    assert all(d["ingested_at"] and "pages" not in d for d in db["documents"])
+    person = next(e for e in db["entities"] if e["value"] == "Angela Thompson")
+    assert person["kind"] == "person" and person["documents"] == 2 and person["mentions"] >= 2
+    assert db["judgements"] == [{"query": "thompson", "doc_id": doc_id, "document": db["judgements"][0]["document"],
+                                 "relevant": False, "activation": 0.2, "created": db["judgements"][0]["created"]}]
+    assert db["jobs"] == [] or db["jobs"][0]["status"] == "done"

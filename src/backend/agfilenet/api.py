@@ -227,6 +227,43 @@ def add_feedback(body: Feedback):
         return {"judgements": len(s.lib.judgements)}
 
 
+@app.get("/api/database")
+def database_contents():
+    """Everything the object database holds apart from page text and the search index itself."""
+    with store.Session() as s:
+        lib = s.lib
+        docs = sorted(lib.documents.values(), key=lambda d: d.path)
+        mentions = {}
+        for doc in docs:
+            for m in doc.mentions:
+                mentions[m.entity.id] = mentions.get(m.entity.id, 0) + m.count
+        matter_files = {}
+        for doc in docs:
+            if doc.decl_matter:
+                matter_files[doc.decl_matter] = matter_files.get(doc.decl_matter, 0) + 1
+        return {
+            "file": {"path": str(config.DB_PATH), "revision": lib.revision,
+                     "size": config.DB_PATH.stat().st_size if config.DB_PATH.exists() else 0},
+            "counts": {"documents": len(docs), "pages": sum(d.page_count for d in docs),
+                       "segments": sum(len(d.segments) for d in docs), "chunks": len(lib.chunks),
+                       "index_terms": len(lib.text_index.postings), "entities": len(lib.entities),
+                       "mentions": sum(len(d.mentions) for d in docs), "matters": len(lib.matters),
+                       "judgements": len(lib.judgements), "jobs": len(lib.jobs)},
+            "documents": [{**_summary(d), "ingested_at": d.ingested_at, "segments": len(d.segments),
+                           "chunks": len(d.chunks), "mentions": len(d.mentions)} for d in docs],
+            "matters": [{"number": m.number, "title": m.title, "reference": m.reference, "package": m.package,
+                         "parties": list(m.parties), "documents": matter_files.get(m.number, 0)}
+                        for m in lib.matters.values()],
+            "entities": sorted(({"id": e.id, "kind": e.kind, "value": e.value, "documents": len(e.documents),
+                                 "mentions": mentions.get(e.id, 0)} for e in lib.entities.values()),
+                               key=lambda e: (e["kind"], -e["documents"], e["value"])),
+            "judgements": sorted(({"query": j.query, "doc_id": j.document.id,
+                                   "document": j.document.title or j.document.filename, "relevant": j.relevant,
+                                   "activation": j.activation, "created": j.created}
+                                  for j in lib.judgements.values()), key=lambda j: j["created"], reverse=True),
+            "jobs": [_job(lib.jobs[k]) for k in reversed(lib.jobs.keys())]}
+
+
 @app.get("/api/export.csv")
 def export_csv():
     """Derived metadata next to what the migration workbook declared, one row per file."""

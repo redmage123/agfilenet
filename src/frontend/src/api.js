@@ -30,6 +30,7 @@ export const api = {
   status: () => request('/api/status'),
   ingest: (force) => request('/api/ingest', json('POST', { force })),
   facets: () => request('/api/facets'),
+  database: () => request('/api/database'),
   documents: (filters) => request(`/api/documents?${query(filters)}`),
   document: (id) => request(`/api/documents/${id}`),
   saveDocument: (id, changes) => request(`/api/documents/${id}`, json('PATCH', changes)),

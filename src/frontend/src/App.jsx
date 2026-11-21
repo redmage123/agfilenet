@@ -1,5 +1,6 @@
 import { Link, NavLink, Route, Routes } from 'react-router-dom'
 import Dashboard from './pages/Dashboard.jsx'
+import Database from './pages/Database.jsx'
 import Documents from './pages/Documents.jsx'
 import DocumentDetail from './pages/DocumentDetail.jsx'
 import Search from './pages/Search.jsx'
@@ -14,6 +15,7 @@ export default function App() {
           <NavLink to="/" end>Overview</NavLink>
           <NavLink to="/documents">Documents</NavLink>
           <NavLink to="/search">Search</NavLink>
+          <NavLink to="/database">Database</NavLink>
         </nav>
       </header>
       <main>
@@ -22,6 +24,7 @@ export default function App() {
           <Route path="/documents" element={<Documents />} />
           <Route path="/documents/:id" element={<DocumentDetail />} />
           <Route path="/search" element={<Search />} />
+          <Route path="/database" element={<Database />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </main>

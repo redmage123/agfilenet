@@ -75,6 +75,7 @@ test.describe('document list', () => {
 
   test('the Check filter uses plain-word labels', async ({ page }) => {
     await page.goto('/documents')
+    await expect(select(page, 'Check').locator('option').nth(1)).toBeAttached()
     const labels = await select(page, 'Check').locator('option').allTextContents()
     expect(labels.length).toBeGreaterThan(1)
     expect(labels.filter((l) => /^(pii|sensitive):|^[a-z]+-[a-z]+/.test(l))).toEqual([])
