@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    image: agfilenet:latest
+    user: "${UID:-1000}:${GID:-1000}"
+    ports:
+      # Published on this machine only: the files contain passports, NI numbers
+      # and medical details, and the app has no login.
+      - "127.0.0.1:${AGFILENET_PORT:-8000}:8000"
+    volumes:
+      - ./data:/data:ro                 # source documents, never modified
+      - ./var:/var/lib/agfilenet        # object database and page-image cache
+    restart: unless-stopped

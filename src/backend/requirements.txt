@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+rapidocr-onnxruntime
+fastembed
+pymupdf
+openpyxl
+numpy
+pillow
+wordninja
+ZODB
+pytest
+httpx
