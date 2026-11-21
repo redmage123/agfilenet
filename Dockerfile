@@ -9,7 +9,7 @@ COPY src/frontend/ ./
 RUN npm run build
 
 # --- application -------------------------------------------------------------
-FROM python:3.10-slim
+FROM python:3.12-slim
 # libGL/glib are needed by OpenCV, which the OCR engine uses
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
@@ -26,7 +26,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY src/backend/requirements.txt src/backend/requirements.txt
 # the extra index has prebuilt CPU wheels of llama-cpp-python, so no compiler is needed
-RUN pip install --no-cache-dir --only-binary=llama-cpp-python \
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir --only-binary=llama-cpp-python \
         --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
         -r src/backend/requirements.txt
 

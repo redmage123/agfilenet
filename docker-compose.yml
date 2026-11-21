@@ -11,3 +11,13 @@ services:
       - ./data:/data:ro                 # source documents, never modified
       - ./var:/var/lib/agfilenet        # object database and page-image cache
     restart: unless-stopped
+    # Hardening: nothing in the image needs to change at run time (the database
+    # and page cache live on the ./var volume), or to gain privileges.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 4g
+    pids_limit: 512
