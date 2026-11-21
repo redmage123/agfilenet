@@ -117,4 +117,38 @@ test.describe('database page', () => {
     await page.goto('/database')
     await expect(page.locator('.error')).toHaveText('database is locked')
   })
+
+  test('the metadata-found page lists each kind of metadata and just the values found', async ({ page, request }) => {
+    const db = await (await request.get('/api/database')).json()
+    await page.goto('/database')
+    await page.getByRole('link', { name: 'See just the metadata items found in the documents.' }).click()
+    await expect(page).toHaveURL(/\/database\/found$/)
+    await expect(page.getByRole('heading', { level: 1, name: 'Metadata found in the documents' })).toBeVisible()
+    const names = ['Titles', 'Document types', 'Dates', 'Subjects', 'Matters', 'Parties', 'People', 'Organisations',
+      'Court and case numbers', 'File references', 'Registry volumes', 'Checks raised']
+    expect(await page.locator('section.card').first().locator('li a').allTextContents()).toEqual(names)
+    for (const [name, values] of [
+      ['People', db.entities.filter((e) => e.kind === 'person').map((e) => e.value)],
+      ['Organisations', db.entities.filter((e) => e.kind === 'org').map((e) => e.value)],
+      ['Document types', db.documents.map((d) => d.doc_type)],
+      ['Titles', db.documents.map((d) => d.title)],
+    ]) {
+      const want = [...new Set(values.filter(Boolean))]
+      const section = page.locator('section.card').filter({ has: page.getByRole('heading', { level: 2, name: new RegExp(`^${name} \\d+$`) }) })
+      await expect(section.getByRole('heading', { level: 2 })).toHaveText(`${name} ${want.length}`)
+      const shown = await section.locator('li').allTextContents()
+      expect([...shown].sort()).toEqual([...want].sort())
+    }
+    await page.getByRole('main').getByRole('link', { name: 'Database' }).first().click()
+    await expect(page).toHaveURL(/\/database$/)
+  })
+
+  test('the metadata-found page copes with an empty database and a failed load', async ({ page }) => {
+    await mockJson(page, '**/api/database', fakeDb())
+    await page.goto('/database/found')
+    await expect(page.getByText('None found.')).toHaveCount(12)
+    await mockJson(page, '**/api/database', { detail: 'database is locked' }, 500)
+    await page.reload()
+    await expect(page.locator('.error')).toHaveText('database is locked')
+  })
 })

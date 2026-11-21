@@ -97,6 +97,8 @@ tr:last-child td { border-bottom: 0; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
 .plain { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 8px; }
+.found { margin: 0; padding-left: 18px; columns: 280px; column-gap: 28px; font-size: 14px; }
+.found li { break-inside: avoid; overflow-wrap: anywhere; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
 .chip { font-size: 13px; background: #eef1f4; color: var(--ink); border-radius: 12px; padding: 2px 10px; }
 .chip-query { background: var(--accent-soft); }

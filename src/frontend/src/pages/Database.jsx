@@ -111,7 +111,8 @@ export default function Database() {
       <h1>Database</h1>
       <p className="muted">
         Everything held in the object database <code>{db.file.path}</code> ({(db.file.size / 1048576).toFixed(1)} MB,
-        revision {db.file.revision}), apart from the page text and the search index itself.
+        revision {db.file.revision}), apart from the page text and the search index itself.{' '}
+        <Link to="/database/found">See just the metadata items found in the documents.</Link>
       </p>
       <section className="tiles">
         {STORED.map(([name, label]) => (

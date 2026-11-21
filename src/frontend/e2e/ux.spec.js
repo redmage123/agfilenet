@@ -9,19 +9,21 @@ const pagesFor = (corpus) => {
     ['document', `/documents/${doc.id}`],
     ['search results', '/search?q=court&mode=iac'],
     ['database', '/database'],
+    ['metadata found', '/database/found'],
   ]
 }
 const settle = async (page, name) => {
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
   if (name === 'search results') await expect(page.locator('.result').first()).toBeVisible({ timeout: 30_000 })
   if (name === 'document') await expect(page.locator('.page-view img')).toBeVisible()
+  if (name === 'metadata found') await expect(page.locator('section.card').nth(1)).toBeVisible()
   if (name === 'database') await expect(page.locator('.doc-table')).toBeVisible()
   if (name === 'document list') await expect(page.locator('.doc-table')).toBeVisible()
 }
 
 test.describe('usability', () => {
-  for (const i of [0, 1, 2, 3, 4]) {
-    test(`accessibility rules (WCAG A and AA) — page ${i + 1} of 5`, async ({ page, corpus }) => {
+  for (const i of [0, 1, 2, 3, 4, 5]) {
+    test(`accessibility rules (WCAG A and AA) — page ${i + 1} of 6`, async ({ page, corpus }) => {
       const [name, path] = pagesFor(corpus)[i]
       await page.goto(path)
       await settle(page, name)
@@ -29,7 +31,7 @@ test.describe('usability', () => {
       expect(violations.map((v) => `${name}: ${v.id} (${v.impact}) × ${v.nodes.length} — ${v.help}`)).toEqual([])
     })
 
-    test(`nothing spills off a phone-sized screen — page ${i + 1} of 5`, async ({ page, corpus }) => {
+    test(`nothing spills off a phone-sized screen — page ${i + 1} of 6`, async ({ page, corpus }) => {
       const [name, path] = pagesFor(corpus)[i]
       await page.setViewportSize({ width: 390, height: 800 })
       await page.goto(path)
@@ -38,7 +40,7 @@ test.describe('usability', () => {
       expect(overflow, `${name} is ${overflow}px wider than the screen`).toBeLessThanOrEqual(1)
     })
 
-    test(`no errors in the browser console — page ${i + 1} of 5`, async ({ page, corpus }) => {
+    test(`no errors in the browser console — page ${i + 1} of 6`, async ({ page, corpus }) => {
       const [name, path] = pagesFor(corpus)[i]
       const problems = watchConsole(page)
       await page.goto(path)
@@ -54,7 +56,7 @@ test.describe('usability', () => {
       await settle(page, name)
       titles.add(await page.title())
     }
-    expect(titles.size).toBe(5)
+    expect(titles.size).toBe(6)
   })
 
   test('the whole search flow works from the keyboard', async ({ page }) => {
