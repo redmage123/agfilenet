@@ -1,6 +1,7 @@
 """HTTP API and static hosting for the React front end."""
 import csv
 import io
+from datetime import date
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Response
@@ -165,6 +166,11 @@ def patch_document(doc_id: int, body: DocumentPatch):
         doc = _get_doc(s.lib, doc_id)
         changes = {k: (v.strip() or None) for k, v in body.model_dump(exclude_unset=True).items()
                    if k in EDITABLE and v is not None}
+        if changes.get("doc_date"):
+            try:
+                changes["doc_date"] = date.fromisoformat(changes["doc_date"]).isoformat()
+            except ValueError:
+                raise HTTPException(422, "the date must be a real date written as YYYY-MM-DD")
         for field, value in changes.items():
             setattr(doc, field, value)
         if changes:

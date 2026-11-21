@@ -2,12 +2,22 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api.js'
 import { flagLabel } from '../flags.jsx'
+import { useTitle } from '../title.js'
 
 export default function Dashboard() {
   const [status, setStatus] = useState(null)
   const [error, setError] = useState(null)
+  const [ingestError, setIngestError] = useState(null)
+  useTitle('Overview')
 
-  const load = () => api.status().then(setStatus).catch((e) => setError(e.message))
+  const load = () =>
+    api
+      .status()
+      .then((s) => {
+        setStatus(s)
+        setError(null)
+      })
+      .catch((e) => setError(e.message))
 
   useEffect(() => {
     load()
@@ -15,7 +25,11 @@ export default function Dashboard() {
     return () => clearInterval(timer)
   }, [])
 
-  const start = (force) => api.ingest(force).then(load).catch((e) => setError(e.message))
+  const start = (force) => {
+    if (force && !window.confirm('Re-read every file from scratch? OCR of the whole collection can take hours.')) return
+    setIngestError(null)
+    api.ingest(force).then(load).catch((e) => setIngestError(e.message))
+  }
 
   if (error) return <p className="error">Could not reach the server: {error}</p>
   if (!status) return <p className="muted">Loading…</p>
@@ -48,6 +62,7 @@ export default function Dashboard() {
             Download metadata (CSV)
           </a>
         </div>
+        {ingestError && <p className="error">Could not start the ingest: {ingestError}</p>}
         {job && (
           <div className="job">
             <div className="bar">

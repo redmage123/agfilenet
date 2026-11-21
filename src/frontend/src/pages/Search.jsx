@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api.js'
 import { Flags } from '../flags.jsx'
+import { useTitle } from '../title.js'
 
 const MODES = [
   ['iac', 'IAC network', 'Keyword and meaning evidence combined in an interactive activation network; related files can surface through shared people, references and matters.'],
@@ -14,8 +15,12 @@ const percent = (p) => (p >= 0.995 ? '>99%' : p < 0.01 ? '<1%' : `${Math.round(p
 export default function Search() {
   const [params, setParams] = useSearchParams()
   const q = params.get('q') || ''
-  const mode = params.get('mode') || 'iac'
+  // A mode can be picked before there is a query; the address only carries it once there is one.
+  const [picked, setPicked] = useState('iac')
+  const urlMode = MODES.some((m) => m[0] === params.get('mode')) ? params.get('mode') : null
+  const mode = urlMode || (q ? 'iac' : picked)
   const [text, setText] = useState(q)
+  useTitle(q ? `${q} – Search` : 'Search')
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -24,6 +29,7 @@ export default function Search() {
   useEffect(() => {
     setText(q)
     setJudged({})
+    setError(null)
     if (!q) {
       setData(null)
       return
@@ -34,14 +40,21 @@ export default function Search() {
     api
       .search(q, mode)
       .then((d) => !stale && setData(d))
-      .catch((e) => !stale && setError(e.message))
+      .catch((e) => {
+        if (stale) return
+        setData(null) // never leave an earlier query's results under the error
+        setError(e.message)
+      })
       .finally(() => !stale && setLoading(false))
     return () => {
       stale = true
     }
   }, [q, mode])
 
-  const go = (nextQ, nextMode) => setParams(nextQ ? { q: nextQ, mode: nextMode } : {})
+  const go = (nextQ, nextMode) => {
+    setPicked(nextMode)
+    setParams(nextQ ? { q: nextQ, mode: nextMode } : {})
+  }
   const judge = (hit, relevant) => {
     api
       .feedback({ query: q, doc_id: hit.id, relevant, activation: hit.activation })
@@ -63,6 +76,7 @@ export default function Search() {
         <input
           type="search"
           autoFocus
+          aria-label="Search the documents"
           placeholder="A name, a reference number, or a description of what you are looking for"
           value={text}
           onChange={(e) => setText(e.target.value)}

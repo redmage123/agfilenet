@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api.js'
 import { Flags, flagLabel } from '../flags.jsx'
+import { useTitle } from '../title.js'
 
 const FILTERS = [
   ['doc_type', 'Type'],
@@ -17,6 +18,7 @@ export default function Documents() {
   const [error, setError] = useState(null)
   const filters = Object.fromEntries(params.entries())
   const key = params.toString()
+  useTitle('Documents')
 
   useEffect(() => {
     api.facets().then(setFacets).catch((e) => setError(e.message))
@@ -40,6 +42,7 @@ export default function Documents() {
       <div className="filters">
         <input
           type="search"
+          aria-label="Filter by title, file name or matter"
           placeholder="Filter by title, file name or matter"
           value={filters.q || ''}
           onChange={(e) => set('q', e.target.value)}
@@ -73,6 +76,7 @@ export default function Documents() {
       ) : (
         <>
           <p className="muted">{docs.length} documents</p>
+          <div className="table-scroll">
           <table className="doc-table">
             <thead>
               <tr>
@@ -105,6 +109,7 @@ export default function Documents() {
               ))}
             </tbody>
           </table>
+          </div>
         </>
       )}
     </>

@@ -3,7 +3,9 @@ async function request(path, options) {
   if (!res.ok) {
     let detail = res.statusText
     try {
-      detail = (await res.json()).detail || detail
+      const body = (await res.json()).detail
+      if (typeof body === 'string') detail = body
+      else if (Array.isArray(body)) detail = body.map((d) => d.msg).join('; ') || detail
     } catch {
       // not JSON
     }

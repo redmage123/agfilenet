@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useBlocker, useParams, useSearchParams } from 'react-router-dom'
 import { api, pageImage, sourceFile } from '../api.js'
 import { Flags } from '../flags.jsx'
+import { useTitle } from '../title.js'
 
 const FIELDS = [
   ['title', 'Title'],
@@ -10,6 +11,9 @@ const FIELDS = [
   ['subject', 'Subject'],
   ['matter', 'Matter'],
 ]
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+const realDate = (s) => ISO_DATE.test(s) && new Date(`${s}T00:00:00Z`).toISOString().slice(0, 10) === s
+const UNSAVED = 'This document has unsaved corrections. Leave without saving them?'
 const KIND_LABELS = {
   person: 'People',
   org: 'Organisations',
@@ -24,9 +28,27 @@ export default function DocumentDetail() {
   const [doc, setDoc] = useState(null)
   const [form, setForm] = useState(null)
   const [error, setError] = useState(null)
+  const [saveError, setSaveError] = useState(null)
   const [saving, setSaving] = useState(false)
   const [showText, setShowText] = useState(true)
-  const pageNo = Math.max(1, parseInt(params.get('page') || '1', 10))
+  const [brokenImage, setBrokenImage] = useState(null)
+  const pageNo = Math.max(1, parseInt(params.get('page'), 10) || 1)
+  const dirty = Boolean(doc && form) && FIELDS.some(([k]) => (doc[k] || '') !== form[k])
+  useTitle(doc ? doc.title || doc.filename : 'Document')
+
+  // Ask before unsaved corrections are lost, whether by a link here or by closing the tab.
+  const blocker = useBlocker(({ currentLocation, nextLocation }) => dirty && currentLocation.pathname !== nextLocation.pathname)
+  useEffect(() => {
+    if (blocker.state !== 'blocked') return
+    if (window.confirm(UNSAVED)) blocker.proceed()
+    else blocker.reset()
+  }, [blocker])
+  useEffect(() => {
+    if (!dirty) return
+    const warn = (e) => e.preventDefault()
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [dirty])
 
   const accept = (d) => {
     setDoc(d)
@@ -36,23 +58,41 @@ export default function DocumentDetail() {
   useEffect(() => {
     setDoc(null)
     setError(null)
+    setSaveError(null)
+    if (!/^\d+$/.test(id)) {
+      setError('document not found')
+      return
+    }
     api.document(id).then(accept).catch((e) => setError(e.message))
   }, [id])
 
-  if (error) return <p className="error">{error}</p>
+  if (error)
+    return (
+      <>
+        <p className="error">{error}</p>
+        <p>
+          <Link to="/documents">Back to the documents list</Link>
+        </p>
+      </>
+    )
   if (!doc) return <p className="muted">Loading…</p>
 
   const page = doc.pages[Math.min(pageNo, doc.pages.length) - 1]
   const goto = (n) => setParams({ page: String(n) }, { replace: true })
-  const dirty = FIELDS.some(([k]) => (doc[k] || '') !== form[k])
   const save = (e) => {
     e.preventDefault()
+    const date = form.doc_date.trim()
+    if (date && !realDate(date)) {
+      setSaveError('The date must be a real date written as YYYY-MM-DD, for example 2017-06-09.')
+      return
+    }
     setSaving(true)
+    setSaveError(null)
     const changes = Object.fromEntries(FIELDS.filter(([k]) => (doc[k] || '') !== form[k]).map(([k]) => [k, form[k]]))
     api
       .saveDocument(doc.id, changes)
       .then(accept)
-      .catch((err) => setError(err.message))
+      .catch((err) => setSaveError(`Not saved: ${err.message}`))
       .finally(() => setSaving(false))
   }
   const entityGroups = Object.entries(KIND_LABELS)
@@ -80,6 +120,11 @@ export default function DocumentDetail() {
                   <input value={form[k]} onChange={(e) => setForm({ ...form, [k]: e.target.value })} />
                 </label>
               ))}
+              {saveError && (
+                <p className="error" role="alert">
+                  {saveError}
+                </p>
+              )}
               <button disabled={!dirty || saving}>{saving ? 'Saving…' : 'Save corrections'}</button>
             </form>
             {doc.parties.length > 0 && (
@@ -233,7 +278,17 @@ export default function DocumentDetail() {
                 )}
               </label>
               <div className={showText ? 'page-view split' : 'page-view'}>
-                <img src={pageImage(doc.id, page.page_no)} alt={`Page ${page.page_no}`} />
+                {brokenImage === pageImage(doc.id, page.page_no) ? (
+                  <p className="notice">
+                    The image of this page could not be loaded; the source file may be missing or unreadable.
+                  </p>
+                ) : (
+                  <img
+                    src={pageImage(doc.id, page.page_no)}
+                    alt={`Page ${page.page_no}`}
+                    onError={(e) => setBrokenImage(e.currentTarget.getAttribute('src'))}
+                  />
+                )}
                 {showText && <pre>{page.text || '(no text found on this page)'}</pre>}
               </div>
             </section>

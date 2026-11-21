@@ -110,6 +110,14 @@ def test_manual_correction_survives_reanalysis(client):
     assert hits[0]["id"] == doc_id
 
 
+def test_correction_refuses_a_date_that_is_not_a_date(client):
+    doc_id = client.get("/api/documents").json()[0]["id"]
+    for bad in ("next tuesday", "2021-02-30", "04/01/2021"):
+        assert client.patch(f"/api/documents/{doc_id}", json={"doc_date": bad}).status_code == 422
+    assert not client.get(f"/api/documents/{doc_id}").json()["edited"]
+    assert client.patch(f"/api/documents/{doc_id}", json={"doc_date": " 2021-01-04 "}).json()["doc_date"] == "2021-01-04"
+
+
 def test_reingest_is_incremental_and_drops_deleted_files(client, workspace):
     with store.Session() as s:
         before = {d.filename: d.ingested_at for d in s.lib.documents.values()}
